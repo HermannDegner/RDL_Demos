@@ -6,7 +6,10 @@
       "PowerShell(Move-Item \"d:\\\\GitHub\\\\RDL_Demos\\\\p5.js\" \"d:\\\\GitHub\\\\RDL_Demos\\\\demo0\\\\p5.js\")",
       "PowerShell(Move-Item \"d:\\\\GitHub\\\\RDL_Demos\\\\p5.sound.min.js\" \"d:\\\\GitHub\\\\RDL_Demos\\\\demo0\\\\p5.sound.min.js\")",
       "PowerShell(Move-Item \"d:\\\\GitHub\\\\RDL_Demos\\\\style.css\" \"d:\\\\GitHub\\\\RDL_Demos\\\\demo0\\\\style.css\")",
-      "PowerShell(Remove-Item \"d:\\\\GitHub\\\\RDL_Demos\\\\sketch_view.html\" -Confirm:$false)"
+      "PowerShell(Remove-Item \"d:\\\\GitHub\\\\RDL_Demos\\\\sketch_view.html\" -Confirm:$false)",
+      "Bash(sed -i 's/RDF minimal world ver2/RDF minimal world ver2.1/' \"/d/GitHub/RDL_Demos/demo4/index.html\")",
+      "Bash(sed -i 's/RDF minimal world ver2/RDF minimal world ver3/' \"/d/GitHub/RDL_Demos/demo5/index.html\")",
+      "Bash(sed -i 's/RDF minimal world ver2/RDF Rabbit Demo v3.1/' \"/d/GitHub/RDL_Demos/demo6/index.html\")"
     ]
   }
 }

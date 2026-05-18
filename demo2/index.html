@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Non-Euclidean Warp Navigation</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    gap: 10px;
+  }
+  h1 { color: #666; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; }
+  canvas { display: block; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  button {
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    padding: 7px 16px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.8; }
+  #btn-remap { background: #e05a30; color: #fff; }
+  #btn-toggle-maze { background: #555; color: #ccc; }
+  #btn-reset { background: #444; color: #ccc; }
+  #btn-mouse-goal { background: #555; color: #ccc; }
+  #btn-mouse-goal.active { background: #c040c0; color: #fff; }
+  #status { color: #555; font-size: 11px; letter-spacing: 0.1em; height: 16px; transition: color 0.5s; }
+  #status.flash { color: #e05a30; }
+  #back {
+    position: fixed; top: 10px; left: 10px; z-index: 999;
+    background: #1a1a2ecc; color: #e0aaff; border: 1px solid #e0aaff;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    font-size: 0.85rem; text-decoration: none;
+  }
+  #back:hover { background: #0f3460; }
+</style>
+</head>
+<body>
+<a id="back" href="../index.html">← 一覧へ戻る</a>
+<h1>Non-Euclidean Warp Navigation</h1>
+<div id="sketch-holder"></div>
+<div class="controls">
+  <button id="btn-remap">🗺 地図を書き換え</button>
+  <button id="btn-toggle-maze">🔒 完全迷路モード: OFF</button>
+  <button id="btn-mouse-goal">🖱 マウスゴール: OFF</button>
+  <button id="btn-reset">↺ 全リセット</button>
+</div>
+<div id="status">—</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
+<script>
+let cellSize = 20;
+let cols, rows;
+let grid=[], particles=[], flowField=[], heatField=[], heatVecField=[];
+let bfsField=[], bfsGradient=[];
+let startCell={x:1,y:1}, goalCell;
+const NUM_PARTICLES=80;
+const F_NOISE=0.09;
+const M_ROT_WARP=0.55, M_SPEED_WARP=0.25, HEAT_WARP_DAMP=0.12;
+const HEAT_DECAY=0.97, HEAT_WALL_GAIN=0.25, HEAT_STUCK_GAIN=0.06;
+const HEAT_BACK_GAIN=0.04, ERROR_THRESHOLD=0.30, ERROR_HEAT_SCALE=0.8;
+const HEAT_DIFFUSE=0.10, HEAT_EXP=0.28;
+const DEATH_THRESHOLD=18.0, DEATH_RATE=0.25;
+const FLOW_LEARN=0.07, FLOW_DECAY=0.998, FLOW_MIN=0.018;
+const MAX_SPEED=2.2, IMMUNITY_FRAMES=40, STUCK_ESCAPE=12;
+const PHASE_GAS_THRESHOLD=8.0, PHASE_NOISE_SCALE=5.0;
+const PHASE_SPEED_SCALE=1.7, PHASE_WARP_SCALE=0.05, PHASE_LEARN_SCALE=0.08;
+let remapFlash=0;
+
+const GOAL_PULL_INIT=0.004, GOAL_PULL_GAIN=0.004, GOAL_PULL_MAX=0.06;
+const GOAL_PULL_DECAY=0.9995, GOAL_GRAVITY_REF=180;
+const BFS_FORCE_GAIN=0.0025, BFS_FORCE_MAX=0.18;
+let goalPull=GOAL_PULL_INIT, totalGoalReaches=0;
+let perfectMazeMode=false;
+
+let mouseGoalMode=false;
+let mouseGX=0, mouseGY=0;
+let prevGoalCX=-1, prevGoalCY=-1;
+
+new p5(function(p){
+
+  p.setup=function(){
+    let cnv=p.createCanvas(800,600);
+    cnv.parent('sketch-holder');
+    cols=p.floor(p.width/cellSize);
+    rows=p.floor(p.height/cellSize);
+    goalCell={x:cols-2, y:rows-2};
+    mouseGX=(goalCell.x+0.5)*cellSize;
+    mouseGY=(goalCell.y+0.5)*cellSize;
+    prevGoalCX=goalCell.x; prevGoalCY=goalCell.y;
+    initMaze(); initFields(); initParticles(); computeBFS();
+
+    document.getElementById('btn-remap').addEventListener('click',()=>remapWorld(p));
+    document.getElementById('btn-toggle-maze').addEventListener('click',()=>{
+      perfectMazeMode=!perfectMazeMode;
+      document.getElementById('btn-toggle-maze').textContent=`🔒 完全迷路モード: ${perfectMazeMode?'ON':'OFF'}`;
+      document.getElementById('btn-toggle-maze').style.background=perfectMazeMode?'#3a7bd5':'#555';
+      initMaze(); initFields(); initParticles(); computeBFS();
+      goalPull=GOAL_PULL_INIT; totalGoalReaches=0;
+      setStatus(perfectMazeMode?'完全迷路（一本道）モード':'ランダム迷路モード');
+    });
+    document.getElementById('btn-mouse-goal').addEventListener('click',()=>{
+      mouseGoalMode=!mouseGoalMode;
+      let btn=document.getElementById('btn-mouse-goal');
+      btn.textContent=`🖱 マウスゴール: ${mouseGoalMode?'ON':'OFF'}`;
+      btn.classList.toggle('active', mouseGoalMode);
+      if(mouseGoalMode){
+        setStatus('マウスでゴールを移動 → 壁の中もOK、セル移動で引力リセット');
+      } else {
+        setStatus('ゴール位置を固定');
+      }
+    });
+    document.getElementById('btn-reset').addEventListener('click',()=>{
+      initMaze(); initFields(); initParticles(); computeBFS();
+      goalPull=GOAL_PULL_INIT; totalGoalReaches=0;
+      setStatus('全リセット');
+    });
+  };
+
+  p.mouseMoved=function(){ updateMouseGoal(p); };
+  p.mouseDragged=function(){ updateMouseGoal(p); };
+
+  function updateMouseGoal(p){
+    if(!mouseGoalMode) return;
+    let mx=p.constrain(p.mouseX, 0, p.width-1);
+    let my=p.constrain(p.mouseY, 0, p.height-1);
+    mouseGX=mx; mouseGY=my;
+    let ncx=p.floor(mx/cellSize), ncy=p.floor(my/cellSize);
+    ncx=p.constrain(ncx,0,cols-1); ncy=p.constrain(ncy,0,rows-1);
+    if(ncx!==prevGoalCX || ncy!==prevGoalCY){
+      goalCell={x:ncx, y:ncy};
+      prevGoalCX=ncx; prevGoalCY=ncy;
+      goalPull=GOAL_PULL_INIT;
+      totalGoalReaches=0;
+      computeBFS();
+    }
+  }
+
+  p.draw=function(){
+    p.background(245);
+    decayHeat(); decayFlow();
+    updateParticles(p);
+    drawHeatField(p); drawHeatVec(p); drawFlowField(p); drawMaze(p);
+    drawStartGoal(p); drawParticles(p); drawHUD(p);
+
+    if(mouseGoalMode){
+      let gx=mouseGX, gy=mouseGY;
+      let inWall=isWallAtPixel(gx,gy);
+      let t=(p.frameCount*0.08);
+      let pulse=0.75+0.25*Math.sin(t);
+      p.noFill();
+      p.stroke(inWall?220:80, inWall?60:220, inWall?60:120, 200*pulse);
+      p.strokeWeight(2);
+      p.circle(gx, gy, cellSize*2.4*pulse);
+      p.strokeWeight(1.5);
+      let cs=cellSize*1.1;
+      p.line(gx-cs, gy, gx+cs, gy);
+      p.line(gx, gy-cs, gx, gy+cs);
+      if(inWall){
+        p.fill(220,60,60,200); p.noStroke(); p.textSize(10);
+        p.text('壁外ゴール', gx+14, gy-10);
+      }
+    }
+
+    if(remapFlash>0){
+      p.noFill(); p.stroke(224,90,48,remapFlash*4);
+      p.strokeWeight(10); p.rect(0,0,p.width,p.height);
+      remapFlash-=3;
+    }
+  };
+
+  function remapWorld(p){
+    if(perfectMazeMode){
+      initPerfectMaze();
+    } else {
+      let newGoal; let tries=0;
+      do {
+        newGoal={x:p.floor(p.random(cols*0.3,cols-2)), y:p.floor(p.random(rows*0.3,rows-2))};
+        tries++;
+      } while(cellDistance(newGoal.x,newGoal.y,startCell.x,startCell.y)<10 && tries<100);
+      if(!mouseGoalMode) goalCell=newGoal;
+      let newGrid=[];
+      for(let y=0;y<rows;y++){
+        let row=[];
+        for(let x=0;x<cols;x++){
+          let wall=(x===0||y===0||x===cols-1||y===rows-1);
+          if(!wall&&p.random()<0.18) wall=true;
+          row.push(wall);
+        }
+        newGrid.push(row);
+      }
+      for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++){
+        let sx=startCell.x+dx, sy=startCell.y+dy;
+        let gx=goalCell.x+dx, gy=goalCell.y+dy;
+        if(inBounds(sx,sy)) newGrid[sy][sx]=false;
+        if(!mouseGoalMode && inBounds(gx,gy)) newGrid[gy][gx]=false;
+      }
+      grid=newGrid;
+    }
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      flowField[y][x].set(0,0); heatField[y][x]=0; heatVecField[y][x].set(0,0);
+    }
+    for(let pt of particles){
+      let cx=p.floor(pt.pos.x/cellSize), cy=p.floor(pt.pos.y/cellSize);
+      if(!inBounds(cx,cy)||grid[cy][cx]) pt.respawn(p,false);
+    }
+    remapFlash=60; goalPull=GOAL_PULL_INIT; totalGoalReaches=0;
+    computeBFS();
+    setStatus(`地図・ゴール移動 → (${goalCell.x}, ${goalCell.y}) → 再適応中...`);
+  }
+
+  function initMaze(){ if(perfectMazeMode) initPerfectMaze(); else initRandomMaze(); }
+
+  function initRandomMaze(){
+    grid=[];
+    for(let y=0;y<rows;y++){
+      let row=[];
+      for(let x=0;x<cols;x++){
+        let wall=(x===0||y===0||x===cols-1||y===rows-1);
+        if(!wall&&Math.random()<0.18) wall=true;
+        row.push(wall);
+      }
+      grid.push(row);
+    }
+    startCell={x:1,y:1};
+    clearAround(startCell.x,startCell.y,2);
+    if(!mouseGoalMode) clearAround(goalCell.x,goalCell.y,2);
+  }
+
+  function initPerfectMaze(){
+    grid=[];
+    for(let y=0;y<rows;y++){ grid.push([]); for(let x=0;x<cols;x++) grid[y].push(true); }
+    let mCols=Math.floor((cols-1)/2), mRows=Math.floor((rows-1)/2);
+    let visited=[];
+    for(let y=0;y<mRows;y++){ visited.push([]); for(let x=0;x<mCols;x++) visited[y].push(false); }
+    visited[0][0]=true; grid[1][1]=false;
+    let stack=[{mx:0,my:0}];
+    while(stack.length>0){
+      let {mx,my}=stack[stack.length-1];
+      let nbrs=[];
+      for(let [dx,dy] of [[0,-1],[0,1],[-1,0],[1,0]]){
+        let nx=mx+dx, ny=my+dy;
+        if(nx>=0&&nx<mCols&&ny>=0&&ny<mRows&&!visited[ny][nx]) nbrs.push({nx,ny,dx,dy});
+      }
+      if(nbrs.length===0){ stack.pop(); }
+      else {
+        let {nx,ny,dx,dy}=nbrs[Math.floor(Math.random()*nbrs.length)];
+        visited[ny][nx]=true; grid[my*2+1+dy][mx*2+1+dx]=false; grid[ny*2+1][nx*2+1]=false;
+        stack.push({mx:nx,my:ny});
+      }
+    }
+    startCell={x:1,y:1};
+    if(!mouseGoalMode) goalCell={x:(mCols-1)*2+1, y:(mRows-1)*2+1};
+  }
+
+  function clearAround(cx,cy,r){
+    for(let y=cy-r;y<=cy+r;y++) for(let x=cx-r;x<=cx+r;x++) if(inBounds(x,y)) grid[y][x]=false;
+  }
+
+  function initFields(){
+    flowField=[]; heatField=[]; heatVecField=[];
+    for(let y=0;y<rows;y++){
+      let fr=[],hr=[],hv=[];
+      for(let x=0;x<cols;x++){
+        fr.push(p.createVector(0,0)); hr.push(0); hv.push(p.createVector(0,0));
+      }
+      flowField.push(fr); heatField.push(hr); heatVecField.push(hv);
+    }
+  }
+
+  function initParticles(){
+    particles=[];
+    for(let i=0;i<NUM_PARTICLES;i++){
+      let pt=new Particle(p); pt.respawn(p,true); particles.push(pt);
+    }
+  }
+
+  function computeBFS(){
+    bfsField=[]; bfsGradient=[];
+    for(let y=0;y<rows;y++){
+      bfsField.push([]); bfsGradient.push([]);
+      for(let x=0;x<cols;x++){ bfsField[y].push(Infinity); bfsGradient[y].push({x:0,y:0}); }
+    }
+    if(!inBounds(goalCell.x,goalCell.y)) return;
+    let seeds=[];
+    if(!grid[goalCell.y][goalCell.x]){
+      seeds.push({x:goalCell.x, y:goalCell.y});
+    } else {
+      outer: for(let r=1;r<=Math.max(cols,rows);r++){
+        for(let dy=-r;dy<=r;dy++) for(let dx=-r;dx<=r;dx++){
+          if(Math.abs(dx)!==r && Math.abs(dy)!==r) continue;
+          let nx=goalCell.x+dx, ny=goalCell.y+dy;
+          if(inBounds(nx,ny)&&!grid[ny][nx]) seeds.push({x:nx,y:ny});
+        }
+        if(seeds.length>0) break outer;
+      }
+    }
+    let queue=[...seeds];
+    for(let s of seeds) bfsField[s.y][s.x]=0;
+    while(queue.length>0){
+      let {x,y}=queue.shift();
+      for(let [dx,dy] of [[0,-1],[0,1],[-1,0],[1,0]]){
+        let nx=x+dx, ny=y+dy;
+        if(inBounds(nx,ny)&&!grid[ny][nx]&&bfsField[ny][nx]===Infinity){
+          bfsField[ny][nx]=bfsField[y][x]+1; queue.push({x:nx,y:ny});
+        }
+      }
+    }
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      if(grid[y][x]||bfsField[y][x]===Infinity) continue;
+      let best=bfsField[y][x], bdx=0, bdy=0;
+      for(let [dx,dy] of [[0,-1],[0,1],[-1,0],[1,0]]){
+        let nx=x+dx, ny=y+dy;
+        if(inBounds(nx,ny)&&!grid[ny][nx]&&bfsField[ny][nx]<best){
+          best=bfsField[ny][nx]; bdx=dx; bdy=dy;
+        }
+      }
+      bfsGradient[y][x]={x:bdx,y:bdy};
+    }
+  }
+
+  function warpVelocity(vel,flow,heat){
+    if(flow.mag()<0.01) return vel;
+    let wc=p.constrain(flow.mag()/(1+heat*HEAT_WARP_DAMP),0,1);
+    let ad=flow.heading()-vel.heading();
+    while(ad>p.PI) ad-=p.TWO_PI; while(ad<-p.PI) ad+=p.TWO_PI;
+    vel.rotate(ad*M_ROT_WARP*wc); vel.mult(1+flow.mag()*M_SPEED_WARP*wc);
+    return vel;
+  }
+
+  class Particle{
+    constructor(p){ this.p=p; this.pos=p.createVector(0,0); this.vel=p.createVector(0,0);
+      this.lastPos=p.createVector(0,0); this.prevGoalDist=0; this.deaths=0;
+      this.immunityFrames=IMMUNITY_FRAMES; this.stuckFrames=0; this.lastWarp=0; this.lastPhase=0; }
+
+    respawn(p,isInitial=false){
+      let placed=false,tries=0;
+      while(!placed&&tries<200){
+        let rx=p.floor(startCell.x+p.random(-1.5,1.5)), ry=p.floor(startCell.y+p.random(-1.5,1.5));
+        if(inBounds(rx,ry)&&!grid[ry][rx]){ this.pos.x=(rx+0.5)*cellSize; this.pos.y=(ry+0.5)*cellSize; placed=true; }
+        tries++;
+      }
+      this.vel=p5.Vector.random2D().mult(MAX_SPEED*0.4);
+      this.lastPos=this.pos.copy();
+      this.prevGoalDist=p5.Vector.dist(this.pos,goalPV(p));
+      this.immunityFrames=IMMUNITY_FRAMES; this.stuckFrames=0; this.lastWarp=0; this.lastPhase=0;
+      if(!isInitial) this.deaths++;
+    }
+
+    update(p){
+      let cx=p.floor(this.pos.x/cellSize), cy=p.floor(this.pos.y/cellSize);
+      if(!inBounds(cx,cy)||grid[cy][cx]){ this.respawn(p); return; }
+      let goalPos=goalPV(p), localFlow=flowField[cy][cx].copy(), localHeat=heatField[cy][cx];
+
+      if(this.immunityFrames>0){ this.immunityFrames--; }
+      else if(localHeat>DEATH_THRESHOLD){
+        let ex=localHeat-DEATH_THRESHOLD;
+        if(p.random()<1-Math.exp(-ex*DEATH_RATE)){
+          let burstDir=this.vel.mag()>0.01?this.vel.copy().normalize():p5.Vector.random2D();
+          let burst=DEATH_THRESHOLD*2.5;
+          heatVecField[cy][cx].add(burstDir.copy().mult(burst));
+          for(let [dx,dy] of [[0,-1],[0,1],[-1,0],[1,0],[-1,-1],[1,-1],[-1,1],[1,1]]){
+            let nx=cx+dx, ny=cy+dy;
+            if(inBounds(nx,ny)&&!grid[ny][nx]) heatVecField[ny][nx].add(burstDir.copy().mult(burst*0.4));
+          }
+          heatField[cy][cx]=Math.max(0,heatVecField[cy][cx].mag());
+          this.deaths++; this.vel=p5.Vector.random2D().mult(MAX_SPEED*PHASE_SPEED_SCALE);
+          this.immunityFrames=IMMUNITY_FRAMES; return;
+        }
+      }
+
+      let phase=p.constrain(localHeat/PHASE_GAS_THRESHOLD,0,1);
+      this.lastPhase=phase;
+
+      let Fg=p5.Vector.sub(goalPos,this.pos);
+      if(Fg.mag()>0){
+        let dist=Fg.mag(), safeDist=Math.max(dist,cellSize*1.5);
+        let gravForce=goalPull*(GOAL_GRAVITY_REF*GOAL_GRAVITY_REF)/(safeDist*safeDist);
+        gravForce=Math.min(gravForce,MAX_SPEED*0.45);
+        gravForce*=1.0/(1.0+localHeat*0.18)*1.0/(1.0+this.stuckFrames*0.25);
+        Fg.normalize(); Fg.mult(gravForce);
+      }
+      let noiseScale=p.lerp(1.0,PHASE_NOISE_SCALE,phase);
+      let sb=this.stuckFrames>3?this.stuckFrames*0.025:0;
+      let xi=p5.Vector.random2D().mult((F_NOISE+sb)*noiseScale);
+      let Ft=p5.Vector.add(Fg,xi);
+
+      let bfsStrength=Math.min(totalGoalReaches*BFS_FORCE_GAIN,BFS_FORCE_MAX);
+      if(bfsStrength>0.001&&bfsField[cy]&&bfsField[cy][cx]!==Infinity){
+        let grad=bfsGradient[cy][cx];
+        if(grad.x!==0||grad.y!==0){
+          let distBoost=1.0+Math.max(0,10-bfsField[cy][cx])*0.08;
+          Ft.add(p.createVector(grad.x,grad.y).mult(bfsStrength*distBoost));
+        }
+      }
+
+      let maxSpd=p.lerp(MAX_SPEED,MAX_SPEED*PHASE_SPEED_SCALE,phase);
+      this.vel.add(Ft); this.vel.limit(maxSpd);
+      this.vel=warpVelocity(this.vel,localFlow.copy().mult(p.lerp(1.0,PHASE_WARP_SCALE,phase)),localHeat);
+      this.vel.limit(maxSpd);
+      this.lastWarp=p.constrain(localFlow.mag()/(1+localHeat*HEAT_WARP_DAMP),0,1)*(1-phase);
+
+      let dp=p5.Vector.add(this.pos,this.vel);
+      let moved=false, av=p.createVector(0,0);
+      if(!isWallAtPixel(dp.x,dp.y)){
+        this.lastPos=this.pos.copy(); this.pos=dp.copy(); av=this.vel.copy(); moved=true; this.stuckFrames=0;
+      } else {
+        let sx2=p.createVector(dp.x,this.pos.y), sy2=p.createVector(this.pos.x,dp.y);
+        if(!isWallAtPixel(sx2.x,sx2.y)){
+          this.lastPos=this.pos.copy(); this.pos.x=sx2.x; this.vel.y*=0.3;
+          av=p.createVector(this.vel.x,0); moved=true; this.stuckFrames=0;
+        } else if(!isWallAtPixel(sy2.x,sy2.y)){
+          this.lastPos=this.pos.copy(); this.pos.y=sy2.y; this.vel.x*=0.3;
+          av=p.createVector(0,this.vel.y); moved=true; this.stuckFrames=0;
+        } else {
+          this.stuckFrames++;
+          if(this.stuckFrames>=STUCK_ESCAPE){ this.vel=p5.Vector.random2D().mult(MAX_SPEED); this.stuckFrames=0; }
+          else { this.vel.rotate(p.random(-p.PI*0.8,p.PI*0.8)); this.vel.mult(0.5); }
+        }
+      }
+
+      let err=p5.Vector.dist(this.vel,av);
+      let ee=Math.max(0,err-ERROR_THRESHOLD), nh=ee*ee*ERROR_HEAT_SCALE;
+      let ngd=p5.Vector.dist(this.pos,goalPos);
+      let ns=isNearStart(cx,cy);
+      let nearGoalBoost=cellDistance(cx,cy,goalCell.x,goalCell.y)<4?p.lerp(2.5,1.0,cellDistance(cx,cy,goalCell.x,goalCell.y)/4):1.0;
+      let curH=heatField[cy][cx];
+
+      if(!moved){
+        let gain=((ns?HEAT_WALL_GAIN*0.3:HEAT_WALL_GAIN)+nh)*nearGoalBoost;
+        let expF=1+curH*HEAT_EXP;
+        let dir=this.vel.mag()>0.01?this.vel.copy().normalize():p5.Vector.random2D();
+        heatVecField[cy][cx].add(dir.mult(gain*expF));
+      } else {
+        if(p5.Vector.dist(this.pos,this.lastPos)<0.3){
+          let dir=this.vel.mag()>0.01?this.vel.copy().normalize():p5.Vector.random2D();
+          heatVecField[cy][cx].add(dir.mult(HEAT_STUCK_GAIN*nearGoalBoost*(1+curH*HEAT_EXP)));
+        }
+        if(ngd>this.prevGoalDist){
+          let awayDir=p5.Vector.sub(this.pos,goalPos).normalize();
+          heatVecField[cy][cx].add(awayDir.mult(HEAT_BACK_GAIN*(1+curH*HEAT_EXP)));
+        }
+        if(nh>0.001){
+          let errVec=p5.Vector.sub(this.vel,av);
+          let errDir=errVec.mag()>0.01?errVec.normalize():p5.Vector.random2D();
+          heatVecField[cy][cx].add(errDir.mult(nh*(1+curH*HEAT_EXP)));
+        }
+        if(this.vel.mag()>0.05){
+          let ah=p5.Vector.add(this.pos,this.vel.copy().normalize().mult(cellSize));
+          if(!isWallAtPixel(ah.x,ah.y)){
+            let learned=this.vel.copy().normalize().mult(this.vel.mag());
+            flowField[cy][cx].lerp(learned,p.lerp(FLOW_LEARN,FLOW_LEARN*PHASE_LEARN_SCALE,phase));
+          }
+        }
+      }
+      heatField[cy][cx]=Math.max(0,heatVecField[cy][cx].mag());
+      this.prevGoalDist=ngd;
+
+      let reach=mouseGoalMode
+        ? p5.Vector.dist(this.pos,goalPV(p)) < cellSize*1.2
+        : cellDistance(p.floor(this.pos.x/cellSize),p.floor(this.pos.y/cellSize),goalCell.x,goalCell.y)<1;
+      if(reach){
+        goalPull=Math.min(goalPull+GOAL_PULL_GAIN,GOAL_PULL_MAX);
+        totalGoalReaches++; this.respawn(p);
+      }
+    }
+  }
+
+  function updateParticles(p){
+    for(let pt of particles) pt.update(p);
+    goalPull=Math.max(goalPull*GOAL_PULL_DECAY,GOAL_PULL_INIT);
+  }
+
+  function decayHeat(){
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      heatVecField[y][x].mult(HEAT_DECAY);
+      if(heatVecField[y][x].mag()<0.001) heatVecField[y][x].set(0,0);
+    }
+    let diff=[];
+    for(let y=0;y<rows;y++){ diff.push([]); for(let x=0;x<cols;x++) diff[y].push(p.createVector(0,0)); }
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      if(grid[y][x]) continue;
+      let hv=heatVecField[y][x], hmag=hv.mag();
+      if(hmag<0.05) continue;
+      let radius=Math.min(Math.floor(hmag/2.5)+1,5), hvDir=hv.copy().normalize();
+      let spreadCells=[], totalWeight=0;
+      for(let dy=-radius;dy<=radius;dy++) for(let dx=-radius;dx<=radius;dx++){
+        if(dx===0&&dy===0) continue;
+        let dist=Math.sqrt(dx*dx+dy*dy); if(dist>radius) continue;
+        let nx=x+dx, ny=y+dy; if(!inBounds(nx,ny)||grid[ny][nx]) continue;
+        let w=1/(dist*dist+0.5); totalWeight+=w; spreadCells.push({nx,ny,w});
+      }
+      if(totalWeight===0) continue;
+      let spread=hmag*HEAT_DIFFUSE;
+      for(let {nx,ny,w} of spreadCells) diff[ny][nx].add(hvDir.copy().mult(spread*(w/totalWeight)));
+      diff[y][x].add(hvDir.copy().mult(-spread));
+    }
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      heatVecField[y][x].add(diff[y][x]);
+      heatField[y][x]=Math.max(0,heatVecField[y][x].mag());
+    }
+  }
+
+  function decayFlow(){
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      let v=flowField[y][x]; if(v.mag()<0.001) continue;
+      v.mult(FLOW_DECAY); if(v.mag()<FLOW_MIN) v.setMag(FLOW_MIN);
+    }
+  }
+
+  function drawMaze(p){
+    p.noStroke(); p.fill(40);
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++) if(grid[y][x]) p.rect(x*cellSize,y*cellSize,cellSize,cellSize);
+  }
+  function drawHeatField(p){
+    p.noStroke();
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      if(grid[y][x]) continue;
+      let h=heatField[y][x]; if(h<=0.05) continue;
+      p.fill(255, Math.max(0,90-h*4), Math.max(0,70-h*5), Math.min(h*15,200));
+      p.rect(x*cellSize,y*cellSize,cellSize,cellSize);
+    }
+  }
+  function drawHeatVec(p){
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      if(grid[y][x]) continue;
+      let hv=heatVecField[y][x]; if(hv.mag()<0.4) continue;
+      let alpha=p.constrain(hv.mag()*18,0,200);
+      p.stroke(255,p.floor(p.lerp(140,40,p.constrain(hv.mag()/8,0,1))),20,alpha);
+      p.strokeWeight(1.8);
+      let px2=x*cellSize+cellSize*0.5, py2=y*cellSize+cellSize*0.5;
+      let dir=hv.copy().normalize().mult(cellSize*0.42);
+      p.line(px2,py2,px2+dir.x,py2+dir.y);
+      p.fill(255,100,20,alpha); p.noStroke(); p.circle(px2+dir.x,py2+dir.y,2.5);
+    }
+  }
+  function drawFlowField(p){
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      if(grid[y][x]) continue;
+      let v=flowField[y][x]; if(v.mag()<0.08) continue;
+      let wc=p.constrain(v.mag()/(1+heatField[y][x]*HEAT_WARP_DAMP),0,1);
+      p.stroke(50,p.floor(p.lerp(100,220,wc)),200,130); p.strokeWeight(1);
+      let px2=x*cellSize+cellSize*0.5, py2=y*cellSize+cellSize*0.5;
+      let dir=v.copy().normalize().mult(cellSize*0.38);
+      p.line(px2,py2,px2+dir.x,py2+dir.y);
+    }
+  }
+  function drawParticles(p){
+    p.noStroke();
+    for(let pt of particles){
+      let ph=pt.lastPhase, r,g,b;
+      if(ph<0.5){ let t=ph*2; r=40; g=p.floor(p.lerp(60,180,t)); b=p.floor(p.lerp(200,210,t)); }
+      else { let t=(ph-0.5)*2; r=p.floor(p.lerp(40,240,t)); g=p.floor(p.lerp(180,120,t)); b=p.floor(p.lerp(210,30,t)); }
+      p.fill(r,g,b,p.lerp(160,100,ph)); p.circle(pt.pos.x,pt.pos.y,p.lerp(5,7,ph));
+    }
+  }
+  function drawStartGoal(p){
+    p.noStroke();
+    p.fill(80,220,120); p.rect(startCell.x*cellSize,startCell.y*cellSize,cellSize,cellSize);
+    if(!mouseGoalMode){
+      p.fill(255,120,120); p.rect(goalCell.x*cellSize,goalCell.y*cellSize,cellSize,cellSize);
+    } else {
+      p.fill(255,80,80,200); p.circle(mouseGX,mouseGY,cellSize*1.0);
+    }
+  }
+  function drawHUD(p){
+    let td=0,ts=0; let solidN=0,liquidN=0,gasN=0;
+    for(let pt of particles){
+      td+=pt.deaths; if(pt.stuckFrames>0) ts++;
+      if(pt.lastPhase<0.33) solidN++;
+      else if(pt.lastPhase<0.66) liquidN++;
+      else gasN++;
+    }
+    p.fill(0); p.noStroke(); p.textSize(13);
+    p.text(`particles: ${particles.length}`,12,20);
+    p.text(`total deaths: ${td}`,12,38);
+    p.text(`stuck: ${ts}`,12,56);
+    p.textSize(11);
+    p.fill(40,60,200);  p.text(`■ 固体: ${solidN}`,12,74);
+    p.fill(40,180,210); p.text(`■ 液体: ${liquidN}`,80,74);
+    p.fill(240,120,30); p.text(`■ 気体: ${gasN}`,155,74);
+    let pullRatio=(goalPull-GOAL_PULL_INIT)/(GOAL_PULL_MAX-GOAL_PULL_INIT);
+    p.fill(80,200,120); p.noStroke(); p.rect(12,88,120*pullRatio,10);
+    p.noFill(); p.stroke(100); p.strokeWeight(1); p.rect(12,88,120,10);
+    p.fill(0); p.noStroke();
+    p.text(`goal pull: ${goalPull.toFixed(3)}  reaches: ${totalGoalReaches}`,12,112);
+    p.text(`path gradient: ${Math.min(totalGoalReaches*BFS_FORCE_GAIN,BFS_FORCE_MAX).toFixed(4)} / ${BFS_FORCE_MAX}`,12,130);
+    p.textSize(11); p.fill(80); p.text('▶ flow (M)',12,152);
+    p.fill(255,100,20); p.text('▶ H_vec (frustration dir)',12,167);
+    if(mouseGoalMode){
+      let inWall=isWallAtPixel(mouseGX,mouseGY);
+      p.fill(inWall?p.color(220,60,60):p.color(80,200,120));
+      p.text(`🖱 MOUSE GOAL ${inWall?'[壁外]':'[経路]'}  (${goalCell.x},${goalCell.y})`,12,185);
+    }
+  }
+
+  function goalPV(p){
+    if(mouseGoalMode) return p.createVector(mouseGX,mouseGY);
+    return p.createVector((goalCell.x+0.5)*cellSize,(goalCell.y+0.5)*cellSize);
+  }
+  function isWallAtPixel(px,py){
+    let cx=Math.floor(px/cellSize), cy=Math.floor(py/cellSize);
+    if(!inBounds(cx,cy)) return true; return grid[cy][cx];
+  }
+  function isNearStart(cx,cy){ return Math.abs(cx-startCell.x)<=2&&Math.abs(cy-startCell.y)<=2; }
+  function cellDistance(x1,y1,x2,y2){ return Math.sqrt((x1-x2)**2+(y1-y2)**2); }
+  function inBounds(x,y){ return x>=0&&x<cols&&y>=0&&y<rows; }
+});
+
+function setStatus(msg){
+  let el=document.getElementById('status');
+  el.textContent=msg; el.classList.add('flash');
+  setTimeout(()=>el.classList.remove('flash'),800);
+}
+</script>
+</body>
+</html>
