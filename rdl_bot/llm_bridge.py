@@ -6,9 +6,15 @@ LLM ブリッジ: ξポンプ / Phase 0 種まき器
 import os
 import json
 from typing import Optional
-import anthropic
+
+try:
+    import anthropic
+except ImportError:
+    # LLM offで使う場合にまでanthropicのインストールを必須にしない。
+    anthropic = None
 
 from node_graph import Node
+from sfo_profile import AI_SFO
 
 
 SYSTEM_PROMPT = """あなたはRDL（関係力学言語）の語彙で思考するアシスタントです。
@@ -27,10 +33,66 @@ RDLの主要概念：
 背景として理解しながら日常語で応答してください。"""
 
 
+VALID_SPATIAL_TAGS = {"人", "概念", "物語", "制度", "身体"}
+
+
+def _sanitize_node_payload(d: dict, fallback_inputs: list[str]) -> Optional[dict]:
+    """
+    LLMが返すJSONの型・値域を検証する。不正な場合はNoneまたはフォールバック値に補正する。
+    例えば inputs が文字列で返ってくると、検索時に1文字ずつパターン扱いされてしまう。
+    """
+    if not isinstance(d, dict):
+        return None
+
+    inputs = d.get("inputs")
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    if not isinstance(inputs, list):
+        inputs = fallback_inputs
+    inputs = [p for p in inputs if isinstance(p, str) and p.strip()]
+    if not inputs:
+        inputs = fallback_inputs
+    if not inputs:
+        return None
+
+    rdl_type = d.get("rdl_type")
+    if not isinstance(rdl_type, str) or not rdl_type.strip():
+        rdl_type = "未分類"
+
+    spatial_tag = d.get("spatial_tag")
+    if spatial_tag not in VALID_SPATIAL_TAGS:
+        spatial_tag = "概念"
+
+    response = d.get("response")
+    if response is not None and not isinstance(response, str):
+        response = str(response)
+
+    try:
+        confidence = float(d.get("confidence", 0.6))
+    except (TypeError, ValueError):
+        confidence = 0.6
+    confidence = max(0.0, min(1.0, confidence))
+
+    return {
+        "inputs": inputs,
+        "rdl_type": rdl_type,
+        "spatial_tag": spatial_tag,
+        "response": response,
+        "confidence": confidence,
+    }
+
+
+def _strip_code_fence(raw: str) -> str:
+    if "```" in raw:
+        return raw.split("```")[1].lstrip("json").strip()
+    return raw
+
+
 class LLMBridge:
-    def __init__(self):
+    def __init__(self, sfo_profile: AI_SFO): # SFOプロファイルを受け取るように変更
+        self.sfo_profile = sfo_profile
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else None
+        self.client = anthropic.Anthropic(api_key=api_key) if (anthropic and api_key) else None
         self.mode = "off"          # off / on / on-once
         self.model = "claude-haiku-4-5-20251001"
 
@@ -56,14 +118,15 @@ class LLMBridge:
             system=SYSTEM_PROMPT,
             messages=messages,
         )
+        raw_output = resp.content[0].text
         if self.mode == "on-once":
             self.mode = "off"
-        return resp.content[0].text
+        return self.sfo_profile.get_sfo_filtered_response(raw_output) # SFOフィルタリングを適用
 
     def ask_for_node(self, user_input: str) -> Optional[Node]:
         """
         入力に対してRDLノード構造を返すようLLMに依頼する。
-        leap時に呼ばれる。
+        未知の入力に対するleap時（対応する既存ノードがない場合）に呼ばれる。
         """
         if not self.client:
             return None
@@ -87,26 +150,99 @@ JSON形式で返してください（他のテキスト不要）。
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
+        # SFOフィルタリングはJSON構造の外側テキストではなく、
+        # パース後の応答文にのみ適用する（生JSONに適用すると
+        # 接頭辞付与や文字列置換でJSONが壊れ、常にパース失敗する）。
         raw = resp.content[0].text.strip()
 
         try:
-            # コードブロックを除去
-            if "```" in raw:
-                raw = raw.split("```")[1].lstrip("json").strip()
+            raw = _strip_code_fence(raw)
             d = json.loads(raw)
+            payload = _sanitize_node_payload(d, fallback_inputs=[user_input])
+            if payload is None:
+                raise ValueError("empty/invalid inputs after sanitization")
+            if payload["response"]:
+                payload["response"] = self.sfo_profile.get_sfo_filtered_response(payload["response"])
             node = Node(
-                inputs=d.get("inputs", [user_input]),
-                rdl_type=d.get("rdl_type", "未分類"),
-                spatial_tag=d.get("spatial_tag", "概念"),
-                response=d.get("response"),
+                inputs=payload["inputs"],
+                rdl_type=payload["rdl_type"],
+                spatial_tag=payload["spatial_tag"],
+                response=payload["response"],
                 source="llm_learned",
-                confidence=float(d.get("confidence", 0.6)),
+                confidence=payload["confidence"],
             )
             if self.mode == "on-once":
                 self.mode = "off"
             return node
         except Exception as e:
             print(f"[LLM JSON parse failed] {e}")
+            print(raw)
+            return None
+
+    def ask_for_node_revision(self, hot_node: Node, user_input: str) -> Optional[Node]:
+        """
+        既に否定が閾値を超えて蓄積した既存ノード（hot_node）を修正するためのノードを生成する。
+        ask_for_node と異なり、「今回たまたま入力された文」ではなく
+        「否定され続けている既存ノードの登録パターン・旧応答・否定理由」を渡し、
+        leapの学習対象を実際にHが溜まった箇所と一致させる。
+        """
+        if not self.client:
+            return None
+
+        recent_counterexamples = hot_node.counterexamples[-5:]
+        counterexample_lines = "\n".join(
+            f'- 入力「{c.get("input", "")}」に対して {c.get("reason", "deny")}'
+            for c in recent_counterexamples
+        ) or "（記録なし）"
+
+        prompt = f"""以下は、あるRDLノードがユーザーから繰り返し否定・言い換え要求を受けている状況です。
+このノードを修正した新しいノードをRDL語彙で生成してください。
+JSON形式で返してください（他のテキスト不要）。
+
+既存ノードの登録パターン: {hot_node.inputs}
+既存ノードの応答（否定されている内容）: "{hot_node.response}"
+既存ノードのrdl_type: "{hot_node.rdl_type}"
+直近の否定・言い換え履歴:
+{counterexample_lines}
+今回あらためて入力された文: "{user_input}"
+
+返すJSON:
+{{
+  "inputs": ["入力パターン1", "入力パターン2"],
+  "rdl_type": "関係性の種類",
+  "spatial_tag": "人 or 概念 or 物語 or 制度 or 身体",
+  "response": "旧応答を踏まえて修正した返答テンプレート（日本語、1〜2文）",
+  "confidence": 0.6
+}}"""
+
+        resp = self.client.messages.create(
+            model=self.model,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+
+        try:
+            raw = _strip_code_fence(raw)
+            d = json.loads(raw)
+            payload = _sanitize_node_payload(d, fallback_inputs=list(hot_node.inputs) or [user_input])
+            if payload is None:
+                raise ValueError("empty/invalid inputs after sanitization")
+            if payload["response"]:
+                payload["response"] = self.sfo_profile.get_sfo_filtered_response(payload["response"])
+            node = Node(
+                inputs=payload["inputs"],
+                rdl_type=payload["rdl_type"],
+                spatial_tag=payload["spatial_tag"],
+                response=payload["response"],
+                source="llm_learned",
+                confidence=payload["confidence"],
+            )
+            if self.mode == "on-once":
+                self.mode = "off"
+            return node
+        except Exception as e:
+            print(f"[LLM revision JSON parse failed] {e}")
             print(raw)
             return None
 
@@ -134,19 +270,24 @@ JSON配列で返してください（他のテキスト不要）。
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
+        # ask_for_node と同様、生JSONにはSFOフィルタリングを適用しない。
         raw = resp.content[0].text.strip()
-        if "```" in raw:
-            raw = raw.split("```")[1].lstrip("json").strip()
+        raw = _strip_code_fence(raw)
 
         try:
             items = json.loads(raw)
             nodes = []
             for d in items:
+                payload = _sanitize_node_payload(d, fallback_inputs=[])
+                if payload is None:
+                    continue
+                if payload["response"]:
+                    payload["response"] = self.sfo_profile.get_sfo_filtered_response(payload["response"])
                 nodes.append(Node(
-                    inputs=d.get("inputs", []),
-                    rdl_type=d.get("rdl_type", "未分類"),
-                    spatial_tag=d.get("spatial_tag", "概念"),
-                    response=d.get("response"),
+                    inputs=payload["inputs"],
+                    rdl_type=payload["rdl_type"],
+                    spatial_tag=payload["spatial_tag"],
+                    response=payload["response"],
                     source="llm_seed",
                     confidence=0.5,
                     ttl=500,
