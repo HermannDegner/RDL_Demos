@@ -37,7 +37,7 @@ from typing import Optional
 from node_graph import NodeGraph, Node
 from h_state import HState
 from llm_bridge import LLMBridge
-from sfo_profile import AI_SFO, create_sfo_profile_from_mbti
+from sfo_profile import AI_SFO, DEFAULT_SFO_PRESET, create_sfo_profile_from_mbti
 from llm_trust import LLMTrust, LLMTrustConfig
 
 
@@ -146,8 +146,9 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
         if len(parts) < 2:
             print("  MBTIタイプを指定してください (例: /mbti INTP)")
         else:
-            mbti_type = parts[1].upper()
-            new_sfo = create_sfo_profile_from_mbti(mbti_type)
+            # 大文字化はしない。プリセット名には RDL_native_* のように
+            # 混在ケースのキーがあり、検索側で正規化される。
+            new_sfo = create_sfo_profile_from_mbti(parts[1])
             sfo_profile.main_foreground_space = new_sfo.main_foreground_space
             sfo_profile.hierarchy_bias = new_sfo.hierarchy_bias
             sfo_profile.得意操作 = new_sfo.得意操作
@@ -155,7 +156,7 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
             sfo_profile.attention_mode = new_sfo.attention_mode
             sfo_profile.initial_fingerprint = new_sfo.initial_fingerprint
             sfo_profile.drift_factor = 0.0 # MBTI変更でドリフトをリセット
-            print(f"  SFOプロファイルを {mbti_type} に基づいて初期化しました。")
+            print(f"  SFOプロファイルを {new_sfo.initial_fingerprint} に基づいて初期化しました。")
 
     elif name == "/trust":
         print(f"  LLM信用度設定: {llm_trust.config.to_dict()}")
@@ -209,6 +210,16 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
 
     if retire:
         graph.retire_dead_nodes()
+
+        # 1b. 退場したノードのH蓄積を破棄する。
+        # グラフから消えたノードIDのHが残ると、修正対象が存在しないまま
+        # should_leap() の最大値を占め続け、実在ノードのleapを妨げる。
+        stale = h_state.prune(graph.nodes.keys())
+        if stale:
+            print(f"  [M_Δ相] 実体を失った {stale} 件のH蓄積を破棄しました。")
+
+        # 1c. leapのたびに上がったθを初期値へ向けて緩める（設計書 §2 動的調整）
+        h_state.relax_theta()
 
         # 2. 類似ノード群のマージまたは分割 (プレースホルダー)
         graph.merge_or_split_nodes()
@@ -420,8 +431,16 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
                 else:
                     return "[LLM応答も失敗しました。ξプールに格納済み]", "__none__"
 
-        elif match_type == "miss":
-            print(f"  [H閾値超過 (θ={h.theta:.2f}) — グラフ内合成を試みます]")
+        else:
+            # hot_nid に対応する実ノードが存在しない。M_Δ相で退場した
+            # ノードか、__llm__ / __crisis__ / __none__ のような疑似IDに
+            # Hが溜まった状態（例：LLM生の応答を数回 n で否定すると
+            # H_post["__llm__"] が閾値を超える）。修正対象が無いので
+            # leapで消化できず、放置すると毎ターン should_leap() の
+            # 最大値を占め続けて実在ノードのleapを永久に妨げる。
+            h.forget(hot_nid)
+            if match_type == "miss":
+                print(f"  [H閾値超過 (θ={h.theta:.2f}) — グラフ内合成を試みます]")
 
     elif match_type == "miss" and llm.mode in ("on", "on-once") and llm.available():
         # H閾値には未達だが、このドメインはまだ内部経験が薄いかもしれない。
@@ -463,7 +482,8 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
 
     # miss、または自ノードが隔離されて代替が出せなかった場合のフォールバック
     # 危機モード判定 (設計書 v0.3 §3.4)
-    if sfo_profile.check_crisis_mode(h.hot_nodes(top=1)[0][1] if h.hot_nodes() else 0, h.theta):
+    hot = h.hot_nodes(top=1)
+    if sfo_profile.check_crisis_mode(hot[0][1] if hot else 0.0, h.theta):
         print("  [危機モード発動] SFOプロファイルに基づき応答傾向を調整します。")
         # 危機モードでの応答ロジックをここに実装
         # 例: より安全な、ユーザーの言葉をなぞる応答に切り替えるなど
@@ -547,7 +567,7 @@ def main():
     if state:
         h = HState.from_dict(state.get("h_state", {}))
         sfo_data = state.get("sfo_profile")
-        sfo_profile = AI_SFO.from_dict(sfo_data) if sfo_data else AI_SFO(initial_fingerprint="RDL_native_observer")
+        sfo_profile = AI_SFO.from_dict(sfo_data) if sfo_data else create_sfo_profile_from_mbti(DEFAULT_SFO_PRESET)
         xi_pool: list[str] = state.get("xi_pool", [])
         saved_llm_mode = state.get("llm_mode")
         _turn_count = state.get("turn_count", 0)
@@ -555,8 +575,10 @@ def main():
     else:
         h = HState(theta=2.0)
         # SFOプロファイルの初期化 (設計書 v0.3 §3.4 MBTI入口プリセット)
-        # 現時点ではRDL_native_observerをデフォルトとする。ユーザー入力で変更可能にする予定。
-        sfo_profile = AI_SFO(initial_fingerprint="RDL_native_observer")
+        # 以前は AI_SFO(initial_fingerprint="RDL_native_observer") と
+        # 指紋の文字列だけを差し替えており、実際の得意操作・苦手操作は
+        # dataclassの既定値のままでプリセットと食い違っていた。
+        sfo_profile = create_sfo_profile_from_mbti(DEFAULT_SFO_PRESET)
         xi_pool = [] # ξプール (設計書 v0.3 §3.5)
         saved_llm_mode = None
         _turn_count = 0

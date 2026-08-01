@@ -22,6 +22,15 @@ pip install -r requirements.txt   # anthropic>=0.40.0
 
 APIキーなしでも seed_v0.1.json（手動20ノード）で最小動作する。
 
+## テスト
+
+```bash
+cd rdl_bot
+python -m unittest discover        # 追加依存なし（stdlibのunittest）
+```
+
+APIキー不要。LLM呼び出しは行わず、検索・H蓄積・leap分岐・代謝・永続化を検証する。
+
 ---
 
 ## コマンド
@@ -31,7 +40,7 @@ APIキーなしでも seed_v0.1.json（手動20ノード）で最小動作する
 | `/llm on\|off\|once` | LLMモード切替 |
 | `/h` | H状態表示（H_pre / H_post / θ） |
 | `/sfo` | 現在のAI_SFOプロファイルを表示 |
-| `/mbti <TYPE>` | MBTIタイプに基づきSFOプロファイルを再初期化（例: `/mbti INTP`） |
+| `/mbti <TYPE>` | MBTIタイプまたは `RDL_native_*` プリセットでSFOプロファイルを再初期化（例: `/mbti INTP`、`/mbti RDL_native_trickster`。大文字小文字は問わない） |
 | `/trust` | ドメイン（spatial_tag）別のLLM信用度と設定値を表示 |
 | `/xipool` | ξプールの内容を表示 |
 | `/graph` | グラフ統計（総ノード数・source別・phase別・status別） |
@@ -52,6 +61,7 @@ rdl_bot/
 ├── sfo_profile.py   AI_SFO（空間流向診断プロファイル・MBTI変換・drift機構）
 ├── llm_trust.py     LLMTrust（ドメイン別LLM信用度モデル）
 ├── requirements.txt
+├── tests/           単体テスト（stdlibのunittestのみ・追加依存なし）
 └── data/
     ├── seed_v0.1.json         手動 Phase 0 ノード（20件・APIキー不要）
     ├── graph.json             実行時に生成・更新される学習グラフ
@@ -70,6 +80,13 @@ rdl_bot/
 - `should_leap()` は `H_pre×0.4 + H_post` の合成値で、全ノード中もっとも高いもの（`hot_nid`）について判定
 - 閾値 θ=2.0 を超えると leap。`leap_done()` は対象ノードの `H_pre` / `H_post` を両方とも減衰させる
 - `should_leap()` は **exact/partial一致時にも毎ターン確認する**（以前はmiss時にしか確認しておらず、否定され続けた既存ノードの応答が固定化する問題があった）
+- θは leap のたびに ×1.05（上限5.0）で上がり、M_Δ相のたびに ×0.97 で初期値2.0へ向けて緩む。
+  上げる経路しか無いと約30回のleapで上限に張り付き二度と反応しなくなるため、設計書 §2 の
+  「動的調整」に合わせて両方向に動かしている（`relax_theta()`）
+- **実ノードに対応しないIDのHは破棄する**（`forget()` / `prune()`）。`__llm__`・`__crisis__`・`__none__`
+  といった疑似IDや、M_Δ相で退場済みのノードIDにHが溜まると、修正対象が存在せずleapで消化できない。
+  放置するとそれが毎ターン `should_leap()` の最大値を占め続け、実在ノードのleapが永久に起きなくなる
+  （例: LLM生応答を3回 `n` で否定すると `H_post["__llm__"]` が閾値を超え、以降の学習が止まる）
 
 ### ノードライフサイクル
 
@@ -137,11 +154,24 @@ confidenceがそのドメインの信用度を下回る場合にも、確率的�
 上書きできる（例: `{"trust_decay_scale": 0.7, "usage_weight": 0.5}`）。
 `/trust` コマンドで現在の設定値とドメイン別信用度を確認できる。
 
+### LLM応答のパース
+
+`ask_for_node()` / `ask_for_node_revision()` / `seed_universal_nodes()` は JSON を要求するが、
+LLMは素のJSON・コードフェンス付き・散文の前置き付きのいずれでも返しうる。`_extract_json()` は
+①素のパース → ②コードフェンスの中身 → ③最初に現れる `{...}` / `[...]` の切り出し、の順で試す。
+③では配列とオブジェクトのうちテキスト中で先に現れる方を優先し、配列内の最初の `{` を掴んで
+一部だけ返すことを避けている。
+
 ### 永続化
 
-- `graph.json`：ノードグラフ本体（原子的書き込み。書き込み中断時は `.corrupt` に退避して空グラフから再開）
-- `session_state.json`：`H_pre`/`H_post`/history、SFOプロファイルとdrift_factor、ξプール、LLMモード、ターン数。
-  50ターンごと・`/quit`終了時に保存し、起動時に自動復元する
+- `graph.json`：ノードグラフ本体（原子的書き込み。書き込み中断時は `.corrupt` に退避して空グラフから再開）。
+  学習したノードには生のユーザー入力が入りうる（`llm_learned` の inputs フォールバック、`counterexamples`）ため
+  `.gitignore` 済み。無ければ起動時に `seed_v0.1.json` から作り直される
+- `session_state.json`：`H_pre`/`H_post`/history、θとθ下限、SFOプロファイルとdrift_factor、ξプール、
+  LLMモード、ターン数。50ターンごと・`/quit`終了時に保存し、起動時に自動復元する。
+  会話由来の内容を含むため `.gitignore` 済み
+- `AI_SFO.from_dict()` / `LLMTrustConfig.from_dict()` は未知のキーを無視する
+  （バージョンをまたいで残る `session_state.json` で起動不能にしないため）
 
 ### 既知の制限（Phase 1）
 
@@ -149,6 +179,11 @@ confidenceがそのドメインの信用度を下回る場合にも、確率的�
 - miss時の最近傍探索は文字N-gram（分かち書き不要）に変更済みだが、埋め込みベースの意味的類似度ではない
 - グラフ内合成（LLM:off 時）は近傍借用のみ。W_ij による本格合成は Phase 4
 - SFO・MBTI初期値・ξ pool・簡易M_Δ代謝は実装済み（`sfo_profile.py`）。SFOがノード選択自体に影響する仕組み、LLMへのノードグラフ文脈注入、W_ijの本格的な張り直しは未着手
+- `NodeGraph.merge_or_split_nodes()` は空実装、`update_relations()` も片方向にIDを足すだけ（Phase D）
+- 危機モードの発火条件は `H > θ×1.5` だが、θ超過の時点で先にleapが走るため実際にはほぼ到達しない。
+  設計書 §3.4 の「H_post連続上昇」「齟齬の連鎖検出」に沿った判定への置き換えが必要
+- `respond()` など主要関数が `(graph, h, llm, sfo_profile, xi_pool, llm_trust)` を引き回しており、
+  状態が増えるほど引数が膨らむ。セッション状態を1つのオブジェクトにまとめる余地がある
 
 ---
 

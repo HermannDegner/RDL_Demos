@@ -5,6 +5,7 @@ LLM ブリッジ: ξポンプ / Phase 0 種まき器
 
 import os
 import json
+import re
 from typing import Optional
 
 try:
@@ -82,10 +83,57 @@ def _sanitize_node_payload(d: dict, fallback_inputs: list[str]) -> Optional[dict
     }
 
 
-def _strip_code_fence(raw: str) -> str:
-    if "```" in raw:
-        return raw.split("```")[1].lstrip("json").strip()
-    return raw
+_CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n?(.*?)(?:```|\Z)", re.DOTALL)
+
+
+def _extract_json(raw: str):
+    """
+    LLM応答からJSONを取り出してパースする。
+
+    以前は raw.split("```")[1].lstrip("json") で言語タグを外していた。
+    str.lstrip() は「先頭にある j/s/o/n という*文字*をすべて剥がす」挙動で
+    あって "json" という前置文字列の除去ではないため、
+      - 言語タグが ```JSON のように大文字だと剥がれずパース失敗
+      - フェンスを付けず散文に続けてJSONを返された場合も丸ごと失敗
+    という取りこぼしがあった（H閾値超過でせっかく呼んだLLM応答が
+    ノード化されず、そのままξプール行きになる）。
+
+    順に、
+      1. 素のテキストとしてパース
+      2. コードフェンスの中身をパース
+      3. 各 { / [ の位置から raw_decode() し、最初に成立した値を返す
+    を試す。すべて失敗したら JSONDecodeError を送出する。
+    """
+    text = raw.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    m = _CODE_FENCE_RE.search(text)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # フェンスも無く前置きの散文が付いている場合の最後の手段。
+    # 各 { / [ の位置から raw_decode() し、独立して成立する最初の値を返す。
+    # 「最初の開き括弧」と「最後の閉じ括弧」で挟む方式だと、値が2つ並ぶ
+    # 応答（`前置き {"a":1} 補足 {"b":2}`）で両者をまたいだ不正なJSONを
+    # 組み立ててしまい、先頭の値が妥当でも取り出せなかった。
+    # raw_decode は末尾の余分なテキストを無視するため後続の散文も許容でき、
+    # 左から順に試すので配列内の最初の { を掴む心配もない。
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", text):
+        try:
+            value, _ = decoder.raw_decode(text, match.start())
+            return value
+        except json.JSONDecodeError:
+            continue
+
+    raise json.JSONDecodeError("JSONペイロードが見つかりません", text or "", 0)
 
 
 class LLMBridge:
@@ -156,8 +204,7 @@ JSON形式で返してください（他のテキスト不要）。
         raw = resp.content[0].text.strip()
 
         try:
-            raw = _strip_code_fence(raw)
-            d = json.loads(raw)
+            d = _extract_json(raw)
             payload = _sanitize_node_payload(d, fallback_inputs=[user_input])
             if payload is None:
                 raise ValueError("empty/invalid inputs after sanitization")
@@ -223,8 +270,7 @@ JSON形式で返してください（他のテキスト不要）。
         raw = resp.content[0].text.strip()
 
         try:
-            raw = _strip_code_fence(raw)
-            d = json.loads(raw)
+            d = _extract_json(raw)
             payload = _sanitize_node_payload(d, fallback_inputs=list(hot_node.inputs) or [user_input])
             if payload is None:
                 raise ValueError("empty/invalid inputs after sanitization")
@@ -272,10 +318,11 @@ JSON配列で返してください（他のテキスト不要）。
         )
         # ask_for_node と同様、生JSONにはSFOフィルタリングを適用しない。
         raw = resp.content[0].text.strip()
-        raw = _strip_code_fence(raw)
 
         try:
-            items = json.loads(raw)
+            items = _extract_json(raw)
+            if not isinstance(items, list):
+                raise ValueError(f"JSON配列を期待しましたが {type(items).__name__} でした")
             nodes = []
             for d in items:
                 payload = _sanitize_node_payload(d, fallback_inputs=[])

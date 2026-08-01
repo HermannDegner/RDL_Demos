@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+# rdl_bot の実行時状態。ユーザーとの会話に由来する内容を含むため共有しない。
+# graph.json も学習したノードに生のユーザー入力（llm_learned の inputs
+# フォールバック、counterexamples）が入るため対象。起動時に無ければ
+# 空グラフから始まり seed_v0.1.json が読み込まれる。
+rdl_bot/data/session_state.json
+rdl_bot/data/graph.json
+rdl_bot/data/*.tmp
+rdl_bot/data/*.corrupt

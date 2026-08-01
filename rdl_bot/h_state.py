@@ -22,6 +22,7 @@ class HState:
         self.H_pre: dict[str, float] = {}   # 入力時のノードミスH（軽い）
         self.H_post: dict[str, float] = {}  # 応答後のユーザー反応H（重い）
         self.theta = theta
+        self.theta_base = theta  # 弛緩の下限（設計書 §2 「初期値2.0、動的調整」）
         self.history: list[HistoryEntry] = []
         self._seq_counter = 0
         self.drift_checkpoint_seq = 0  # 前回のドリフト集計位置（M_Δ相の二重集計を防ぐ）
@@ -75,6 +76,42 @@ class HState:
         self.H_pre[node_id] = self.H_pre.get(node_id, 0) * 0.3
         self.H_post[node_id] = self.H_post.get(node_id, 0) * 0.3
         self.theta = min(self.theta * 1.05, 5.0)
+
+    def relax_theta(self, factor: float = 0.97):
+        """
+        θを初期値へ向けてゆっくり戻す（M_Δ相から呼ばれる）。
+
+        leap_done() の θ×1.05 だけだと閾値は単調増加のラチェットになり、
+        30回ほどleapした時点で上限5.0に張り付いて二度と下がらない。
+        設計書 §2 は θ を「動的調整」と定めており、再編成が落ち着いた
+        期間には緩んで再び反応できるようになる必要がある。
+        theta_base を下限とし、それ以下には緩まない。
+        """
+        self.theta = max(self.theta * factor, self.theta_base)
+
+    def forget(self, node_id: str):
+        """
+        あるノードIDのH蓄積を完全に破棄する。
+
+        M_Δ相で退場したノードや、__llm__ / __crisis__ / __none__ といった
+        実ノードに対応しない疑似IDにHが溜まると、修正対象が存在しないため
+        leapで消化できない。それが毎ターン should_leap() の最大値を占め続け、
+        実在ノードのleapが永久に起きなくなる（＝学習が止まる）。
+        """
+        self.H_pre.pop(node_id, None)
+        self.H_post.pop(node_id, None)
+
+    def prune(self, valid_node_ids) -> int:
+        """
+        グラフに存在しないノードIDのH蓄積をまとめて破棄する。破棄件数を返す。
+        M_Δ相の retire_dead_nodes() 後に呼ぶことで、退場済みノードのHが
+        永久に残り続けるのを防ぐ。
+        """
+        valid = set(valid_node_ids)
+        stale = (set(self.H_pre) | set(self.H_post)) - valid
+        for nid in stale:
+            self.forget(nid)
+        return len(stale)
 
     def on_llm_call(self, node_id: str = "__llm__"):
         self._log(node_id, "llm_call", 0.1) # LLM呼び出しも履歴として記録
@@ -131,6 +168,7 @@ class HState:
             "H_pre": self.H_pre,
             "H_post": self.H_post,
             "theta": self.theta,
+            "theta_base": self.theta_base,
             "history": [asdict(e) for e in self.history],
             "seq_counter": self._seq_counter,
             "drift_checkpoint_seq": self.drift_checkpoint_seq,
@@ -139,6 +177,9 @@ class HState:
     @classmethod
     def from_dict(cls, data: dict) -> "HState":
         h = cls(theta=data.get("theta", 2.0))
+        # theta_base 未保存の旧セッションでは、既に上がりきったthetaを
+        # 下限として固定してしまわないよう既定値2.0に戻す。
+        h.theta_base = data.get("theta_base", 2.0)
         h.H_pre = data.get("H_pre", {})
         h.H_post = data.get("H_post", {})
         h.history = [HistoryEntry(**e) for e in data.get("history", [])]

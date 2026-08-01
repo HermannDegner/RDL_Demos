@@ -1,0 +1,271 @@
+"""ノード検索・ライフサイクル・永続化（node_graph.py）"""
+
+import json
+import os
+import tempfile
+import unittest
+
+from node_graph import Node, NodeGraph, _char_ngrams, _ngram_similarity
+
+
+class GraphTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.path = os.path.join(self.tmpdir.name, "graph.json")
+
+    def graph(self, *nodes) -> NodeGraph:
+        g = NodeGraph(self.path)
+        for n in nodes:
+            g.add(n)
+        return g
+
+
+class TestSimilarity(unittest.TestCase):
+    def test_japanese_text_has_nonzero_similarity(self):
+        """分かち書きされない日本語でも近傍比較できること（空白splitでは0になる）。"""
+        a = _char_ngrams("今日は疲れた")
+        b = _char_ngrams("今日はとても疲れた")
+        self.assertGreater(_ngram_similarity(a, b), 0.0)
+
+    def test_identical_text_is_one(self):
+        a = _char_ngrams("こんにちは")
+        self.assertEqual(_ngram_similarity(a, a), 1.0)
+
+    def test_disjoint_text_is_zero(self):
+        self.assertEqual(
+            _ngram_similarity(_char_ngrams("あいうえ"), _char_ngrams("かきくけ")), 0.0
+        )
+
+    def test_empty_inputs(self):
+        self.assertEqual(_char_ngrams(""), set())
+        self.assertEqual(_ngram_similarity(set(), set()), 0.0)
+
+    def test_single_char_shorter_than_n(self):
+        self.assertEqual(_char_ngrams("あ"), {"あ"})
+
+
+class TestSearch(GraphTestCase):
+    def test_exact_match(self):
+        n = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(n)
+        node, kind, _ = g.search("こんにちは")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(node.id, n.id)
+
+    def test_partial_match(self):
+        n = Node(inputs=["疲れた"], response="休もう")
+        g = self.graph(n)
+        node, kind, _ = g.search("今日はとても疲れた")
+        self.assertEqual(kind, "partial")
+        self.assertEqual(node.id, n.id)
+
+    def test_miss_returns_nearest(self):
+        n = Node(inputs=["今日は疲れた"])
+        g = self.graph(n)
+        node, kind, nearest = g.search("今日は眠い")
+        self.assertEqual(kind, "miss")
+        self.assertIsNone(node)
+        self.assertEqual(nearest.id, n.id)
+
+    def test_miss_on_empty_graph_has_no_nearest(self):
+        g = self.graph()
+        node, kind, nearest = g.search("何か")
+        self.assertEqual(kind, "miss")
+        self.assertIsNone(nearest)
+
+    def test_partial_score_prefers_closer_length(self):
+        """
+        回帰テスト: 以前のスコアは len(pattern)/len(text) だったため、
+        登録パターンが長いほど過剰に高得点になる逆転があった。
+        """
+        close = Node(inputs=["疲れたので休みたい"], response="近い")
+        far = Node(inputs=["疲"], response="遠い")
+        g = self.graph(close, far)
+        node, kind, _ = g.search("疲れたので休みたいです")
+        self.assertEqual(kind, "partial")
+        self.assertEqual(node.id, close.id)
+
+    def test_exact_prefers_higher_confidence(self):
+        low = Node(inputs=["やあ"], response="低", confidence=0.2)
+        high = Node(inputs=["やあ"], response="高", confidence=0.9)
+        g = self.graph(low, high)
+        node, kind, _ = g.search("やあ")
+        self.assertEqual(node.response, "高")
+
+    def test_user_node_wins_over_llm_seed(self):
+        seed = Node(inputs=["ありがとう"], response="seed", source="llm_seed", confidence=0.5)
+        learned = Node(inputs=["ありがとう"], response="learned", source="llm_learned", confidence=0.9)
+        g = self.graph(seed, learned)
+        node, kind, _ = g.search("ありがとう")
+        self.assertEqual(node.response, "learned")
+
+
+class TestStatusResolution(GraphTestCase):
+    def test_quarantined_node_is_treated_as_miss(self):
+        n = Node(inputs=["だめな応答"], response="否定された")
+        n.status = "quarantined"
+        g = self.graph(n)
+        node, kind, _ = g.search("だめな応答")
+        self.assertEqual(kind, "miss")
+        self.assertIsNone(node)
+
+    def test_deprecated_node_redirects_to_successor(self):
+        successor = Node(inputs=["新"], response="修正版")
+        old = Node(inputs=["旧い応答"], response="古い")
+        old.status = "deprecated"
+        old.relations.append(successor.id)
+        g = self.graph(old, successor)
+        node, kind, _ = g.search("旧い応答")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(node.id, successor.id)
+
+    def test_deprecated_without_successor_is_miss(self):
+        old = Node(inputs=["旧い応答"], response="古い")
+        old.status = "deprecated"
+        g = self.graph(old)
+        node, kind, _ = g.search("旧い応答")
+        self.assertEqual(kind, "miss")
+
+    def test_deprecated_cycle_does_not_hang(self):
+        a = Node(inputs=["A"], response="a")
+        b = Node(inputs=["B"], response="b")
+        a.status = b.status = "deprecated"
+        a.relations.append(b.id)
+        b.relations.append(a.id)
+        g = self.graph(a, b)
+        node, kind, _ = g.search("A")
+        self.assertEqual(kind, "miss")
+
+    def test_deprecated_chain_reaches_active(self):
+        active = Node(inputs=["C"], response="最終")
+        mid = Node(inputs=["B"], response="中")
+        first = Node(inputs=["A"], response="初")
+        mid.status = first.status = "deprecated"
+        first.relations.append(mid.id)
+        mid.relations.append(active.id)
+        g = self.graph(first, mid, active)
+        node, kind, _ = g.search("A")
+        self.assertEqual(node.id, active.id)
+
+
+class TestTopKSimilar(GraphTestCase):
+    def test_excludes_non_active_nodes(self):
+        active = Node(inputs=["今日は疲れた"], spatial_tag="身体")
+        quarantined = Node(inputs=["今日は疲れた"], spatial_tag="概念")
+        quarantined.status = "quarantined"
+        g = self.graph(active, quarantined)
+        top = g.top_k_similar("今日は疲れた", k=5)
+        self.assertEqual([n.id for n, _ in top], [active.id])
+
+    def test_sorted_descending_and_limited(self):
+        g = self.graph(
+            Node(inputs=["今日は疲れた"]),
+            Node(inputs=["今日は疲れたね"]),
+            Node(inputs=["まったく別の話"]),
+        )
+        top = g.top_k_similar("今日は疲れた", k=2)
+        self.assertEqual(len(top), 2)
+        self.assertGreaterEqual(top[0][1], top[1][1])
+
+
+class TestLifecycle(GraphTestCase):
+    def test_promotion_to_m_act(self):
+        n = Node(inputs=["x"])
+        self.assertEqual(n.phase, "M_lat")
+        for _ in range(3):
+            n.increment_usage()
+        self.assertEqual(n.phase, "M_act")
+
+    def test_touch_refreshes_ttl(self):
+        n = Node(inputs=["x"])
+        for _ in range(50):
+            n.decay_confidence()
+        self.assertEqual(n.ttl, 50)
+        n.touch()
+        self.assertEqual(n.ttl, 100)
+
+    def test_confidence_decays_only_after_ttl_expires(self):
+        n = Node(inputs=["x"], ttl=1, confidence=1.0)
+        n.decay_confidence()
+        self.assertEqual(n.confidence, 1.0)
+        n.decay_confidence()
+        self.assertAlmostEqual(n.confidence, 0.9)
+
+    def test_counterexamples_are_capped(self):
+        n = Node(inputs=["x"])
+        for i in range(60):
+            n.record_counterexample(f"入力{i}", "deny")
+        self.assertEqual(len(n.counterexamples), 50)
+        self.assertEqual(n.counterexamples[-1]["input"], "入力59")
+
+    def test_retire_only_removes_dead_and_unconfident(self):
+        dead = Node(inputs=["dead"], ttl=0, confidence=0.05)
+        low_conf_alive = Node(inputs=["alive"], ttl=10, confidence=0.05)
+        expired_confident = Node(inputs=["confident"], ttl=0, confidence=0.9)
+        g = self.graph(dead, low_conf_alive, expired_confident)
+        g.retire_dead_nodes()
+        self.assertEqual(set(g.nodes), {low_conf_alive.id, expired_confident.id})
+
+
+class TestPersistence(GraphTestCase):
+    def test_save_and_reload_round_trip(self):
+        n = Node(inputs=["こんにちは"], rdl_type="挨拶", spatial_tag="人",
+                 response="やあ", source="manual", confidence=0.8)
+        n.approval_count = 4
+        g = self.graph(n)
+        g.save()
+
+        reloaded = NodeGraph(self.path)
+        self.assertEqual(len(reloaded.nodes), 1)
+        got = reloaded.get_by_id(n.id)
+        self.assertEqual(got.inputs, ["こんにちは"])
+        self.assertEqual(got.spatial_tag, "人")
+        self.assertEqual(got.approval_count, 4)
+        self.assertAlmostEqual(got.confidence, 0.8)
+
+    def test_corrupt_file_is_backed_up_not_discarded(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("{壊れたJSON")
+        g = NodeGraph(self.path)
+        self.assertEqual(len(g.nodes), 0)
+        self.assertTrue(os.path.exists(self.path + ".corrupt"))
+
+    def test_missing_file_starts_empty(self):
+        g = NodeGraph(os.path.join(self.tmpdir.name, "nope", "graph.json"))
+        self.assertEqual(len(g.nodes), 0)
+
+    def test_save_creates_missing_directory(self):
+        nested = os.path.join(self.tmpdir.name, "deep", "graph.json")
+        g = NodeGraph(nested)
+        g.add(Node(inputs=["x"]))
+        g.save()
+        with open(nested, encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)), 1)
+
+
+class TestStats(GraphTestCase):
+    def test_counts_by_source_and_phase(self):
+        a = Node(inputs=["a"], source="manual")
+        b = Node(inputs=["b"], source="llm_seed")
+        for _ in range(3):
+            b.increment_usage()
+        g = self.graph(a, b)
+        s = g.stats()
+        self.assertEqual(s["total"], 2)
+        self.assertEqual(s["by_source"], {"manual": 1, "llm_seed": 1})
+        self.assertEqual(s["by_phase"], {"M_lat": 1, "M_act": 1})
+
+
+class TestRelations(GraphTestCase):
+    def test_update_relations_is_idempotent(self):
+        a = Node(inputs=["a"])
+        b = Node(inputs=["b"])
+        g = self.graph(a, b)
+        g.update_relations(a.id, [b.id])
+        g.update_relations(a.id, [b.id])
+        self.assertEqual(a.relations, [b.id])
+
+
+if __name__ == "__main__":
+    unittest.main()
