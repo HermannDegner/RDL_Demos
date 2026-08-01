@@ -1,0 +1,1399 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RDF v4 近傍セル評価移動（整理版）</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #111;
+      color: #eee;
+    }
+    .app {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 980px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 8px 12px;
+    }
+    .button {
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      padding: 4px 10px;
+      border: 1px solid #444;
+      background: #141414;
+      color: #eee;
+      border-radius: 8px;
+    }
+    .button:hover { background: #202020; }
+    .button:disabled { opacity: 0.45; cursor: default; }
+    .button.active { background: #17324d; color: #9fd0ff; border-color: #2f6ea4; }
+    .button.go { background: #18361f; color: #93e19a; border-color: #2a7d38; }
+    .button.stop { background: #3f1c1c; color: #ffb1b1; border-color: #9f4343; }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .grow { flex: 1; }
+    .muted { color: #aaa; }
+    .small { font-size: 11px; }
+    .tiny { font-size: 10px; }
+    .hidden { display: none !important; }
+
+    .catalog-link {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      z-index: 999;
+      padding: 6px 12px;
+      border: 1px solid #7f6aa5;
+      border-radius: 6px;
+      background: #1a1a2ecc;
+      color: #d9bfff;
+      font-family: system-ui, sans-serif;
+      font-size: 0.82rem;
+      text-decoration: none;
+    }
+    .catalog-link:hover { background: #26385a; }
+
+    .progress-track {
+      background: #252525;
+      height: 6px;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0;
+      background: #6eb2ff;
+      transition: width 0.1s;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    th, td {
+      padding: 4px 6px;
+      border-bottom: 1px solid #2b2b2b;
+      text-align: left;
+    }
+    th {
+      color: #bbb;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }
+    td { color: #ccc; }
+    tr:hover td { background: #181818; }
+    tr.best td {
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 10px;
+    }
+    .badge.ok { background: #16351d; color: #93e19a; }
+    .badge.ng { background: #3d1a1a; color: #ffb1b1; }
+
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 11px;
+    }
+    .slider-row label {
+      width: 72px;
+      color: #aaa;
+      flex-shrink: 0;
+    }
+    .slider-row input[type="range"] { flex: 1; }
+    .slider-row span {
+      width: 56px;
+      text-align: right;
+      color: #fff;
+    }
+
+    .chip {
+      display: inline-block;
+      background: #17324d;
+      color: #9fd0ff;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      margin-right: 4px;
+      margin-bottom: 2px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .stat-group-title {
+      font-size: 10px;
+      color: #aaa;
+      margin-bottom: 4px;
+    }
+    .stat-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 10px;
+      margin-bottom: 2px;
+    }
+    .stat-key { color: #888; }
+    .stat-value { color: #fff; font-weight: 600; }
+
+    canvas {
+      display: block;
+      max-width: 100%;
+      border-radius: 8px;
+    }
+    #sim {
+      border: 1px solid #333;
+      cursor: crosshair;
+    }
+    #graph {
+      background: #171717;
+    }
+  </style>
+</head>
+<body>
+  <a class="catalog-link" href="../../index.html">← 一覧へ戻る</a>
+  <div class="app">
+    <div id="searchPhase">
+      <div class="panel row">
+        <button id="searchButton" class="button">▶ 検索</button>
+        <button id="quickStartButton" class="button">⏭ 検索省略で実行</button>
+        <div class="grow" style="min-width: 180px;">
+          <div class="row tiny muted" style="justify-content: space-between; margin-bottom: 2px;">
+            <span id="searchStatus">待機中</span>
+            <span id="searchProgressText">0/81</span>
+          </div>
+          <div class="progress-track"><div id="searchProgressBar" class="progress-fill"></div></div>
+        </div>
+        <button id="applyButton" class="button go" disabled>適用して実行 ▶</button>
+      </div>
+
+      <div class="panel" style="padding: 0; overflow: hidden;">
+        <table>
+          <thead>
+            <tr>
+              <th data-sort="score">スコア</th>
+              <th data-sort="reproK">reproK</th>
+              <th data-sort="regenK">regenK</th>
+              <th data-sort="killBase">killBase</th>
+              <th data-sort="carnMeta">carnMeta</th>
+              <th data-sort="metaCount">介入</th>
+              <th data-sort="hMin">hMin</th>
+              <th>生存</th>
+            </tr>
+          </thead>
+          <tbody id="resultTableBody"></tbody>
+        </table>
+        <div id="emptyMessage" class="small muted" style="padding: 10px; text-align: center;">
+          検索開始 → 行クリック → 適用して実行 / 省略して即実行
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+          <span style="font-weight: 700; font-size: 12px;">適用パラメータ</span>
+          <span id="currentScore" class="tiny muted"></span>
+        </div>
+
+        <div class="slider-row">
+          <label for="sliderReproK">reproK</label>
+          <input type="range" id="sliderReproK" min="3" max="18" step="1" value="10" />
+          <span id="labelReproK">10</span>
+        </div>
+        <div class="slider-row">
+          <label for="sliderRegenK">regenK</label>
+          <input type="range" id="sliderRegenK" min="0.4" max="2.4" step="0.1" value="1.2" />
+          <span id="labelRegenK">1.2</span>
+        </div>
+        <div class="slider-row">
+          <label for="sliderKillBase">killBase</label>
+          <input type="range" id="sliderKillBase" min="0.12" max="0.42" step="0.02" value="0.26" />
+          <span id="labelKillBase">0.26</span>
+        </div>
+        <div class="slider-row" style="margin-bottom: 0;">
+          <label for="sliderCarnMeta">carnMeta</label>
+          <input type="range" id="sliderCarnMeta" min="0.0010" max="0.0024" step="0.0001" value="0.0016" />
+          <span id="labelCarnMeta">0.0016</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="simulationPhase" class="hidden">
+      <div class="panel row">
+        <button id="backButton" class="button">← 再検索</button>
+        <div id="appliedParameterChips" class="grow"></div>
+        <button id="restartButton" class="button">↺ リセット</button>
+      </div>
+
+      <div class="row">
+        <button id="runToggleButton" class="button stop">■ 実行中</button>
+        <span class="small muted">速度:</span>
+        <button id="speed025" class="button">×0.25</button>
+        <button id="speed05" class="button">×0.5</button>
+        <button id="speed1" class="button active">×1</button>
+        <button id="speed2" class="button">×2</button>
+        <button id="speed5" class="button">×5</button>
+        <span id="populationDisplay" class="small muted">草食:0 肉食:0 tick:0</span>
+        <span id="stuckDisplay" class="tiny muted"></span>
+      </div>
+
+      <canvas id="sim" width="750" height="450"></canvas>
+      <canvas id="graph" width="750" height="70"></canvas>
+
+      <div class="row tiny muted" style="gap: 10px;">
+        <span><span style="color:#55cc66">■</span> 草食</span>
+        <span><span style="color:#dd4433">■</span> 肉食×4</span>
+        <span><span style="color:#4488ff">■</span> 介入</span>
+      </div>
+
+      <div class="panel stats">
+        <div>
+          <div class="stat-group-title">草食</div>
+          <div class="stat-line"><span class="stat-key">餓死</span><span id="stat-hs" class="stat-value">0</span></div>
+          <div class="stat-line"><span class="stat-key">渇死</span><span id="stat-ht" class="stat-value">0</span></div>
+          <div class="stat-line"><span class="stat-key">捕食</span><span id="stat-hp" class="stat-value">0</span></div>
+        </div>
+        <div>
+          <div class="stat-group-title">肉食</div>
+          <div class="stat-line"><span class="stat-key">餓死</span><span id="stat-cs" class="stat-value">0</span></div>
+          <div class="stat-line"><span class="stat-key">渇死</span><span id="stat-ct" class="stat-value">0</span></div>
+        </div>
+        <div>
+          <div class="stat-group-title">メタAI/脱出</div>
+          <div class="stat-line"><span class="stat-key">介入</span><span id="stat-meta" class="stat-value">0</span></div>
+          <div class="stat-line"><span class="stat-key">escape</span><span id="stat-esc" class="stat-value">0</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const CONFIG = {
+        worldWidth: 75,
+        worldHeight: 50,
+        cellSize: 10,
+        behaviorColors: ['#999', '#ffcc00', '#33aaff', '#ff4444', '#cc2222', '#8866aa'],
+        behaviors: {
+          WANDER: 0,
+          FEED: 1,
+          DRINK: 2,
+          FLEE: 3,
+          HUNT: 4,
+          REST: 5,
+        },
+        scenarioGrid: {
+          reproK: [5, 10, 15],
+          regenK: [0.8, 1.4, 2.0],
+          killBase: [0.18, 0.26, 0.34],
+          carnMeta: [0.0012, 0.0016, 0.0020],
+        },
+        searchMaxTicks: 2000,
+        initialHerbivores: 25,
+        initialCarnivores: 7,
+        historyLimit: 300,
+      };
+
+      const TILE = {
+        GRASS: 0,
+        WATER: 1,
+        FOREST: 2,
+        FRUIT: 3,
+      };
+
+      const rnd = () => Math.random() - 0.5;
+
+      const state = {
+        parameters: {
+          reproK: 10,
+          regenK: 1.2,
+          killBase: 0.26,
+          carnMeta: 0.0016,
+        },
+        results: [],
+        sortKey: 'score',
+        sortDirection: -1,
+        selectedResultIndex: null,
+        simulation: {
+          running: false,
+          speed: 1,
+          tick: 0,
+          world: null,
+          agents: [],
+          history: { h: [], c: [], meta: [] },
+          deathStats: { hs: 0, ht: 0, hp: 0, cs: 0, ct: 0, meta: 0, esc: 0 },
+        },
+      };
+
+      let agentIdSequence = 0;
+
+      const elements = {
+        searchPhase: document.getElementById('searchPhase'),
+        simulationPhase: document.getElementById('simulationPhase'),
+
+        searchButton: document.getElementById('searchButton'),
+        searchStatus: document.getElementById('searchStatus'),
+        quickStartButton: document.getElementById('quickStartButton'),
+        searchProgressText: document.getElementById('searchProgressText'),
+        searchProgressBar: document.getElementById('searchProgressBar'),
+        applyButton: document.getElementById('applyButton'),
+
+        resultTableBody: document.getElementById('resultTableBody'),
+        emptyMessage: document.getElementById('emptyMessage'),
+        currentScore: document.getElementById('currentScore'),
+
+        sliderReproK: document.getElementById('sliderReproK'),
+        sliderRegenK: document.getElementById('sliderRegenK'),
+        sliderKillBase: document.getElementById('sliderKillBase'),
+        sliderCarnMeta: document.getElementById('sliderCarnMeta'),
+        labelReproK: document.getElementById('labelReproK'),
+        labelRegenK: document.getElementById('labelRegenK'),
+        labelKillBase: document.getElementById('labelKillBase'),
+        labelCarnMeta: document.getElementById('labelCarnMeta'),
+
+        appliedParameterChips: document.getElementById('appliedParameterChips'),
+        backButton: document.getElementById('backButton'),
+        restartButton: document.getElementById('restartButton'),
+        runToggleButton: document.getElementById('runToggleButton'),
+        speed025: document.getElementById('speed025'),
+        speed05: document.getElementById('speed05'),
+        speed1: document.getElementById('speed1'),
+        speed2: document.getElementById('speed2'),
+        speed5: document.getElementById('speed5'),
+        populationDisplay: document.getElementById('populationDisplay'),
+        stuckDisplay: document.getElementById('stuckDisplay'),
+
+        simCanvas: document.getElementById('sim'),
+        graphCanvas: document.getElementById('graph'),
+
+        statHs: document.getElementById('stat-hs'),
+        statHt: document.getElementById('stat-ht'),
+        statHp: document.getElementById('stat-hp'),
+        statCs: document.getElementById('stat-cs'),
+        statCt: document.getElementById('stat-ct'),
+        statMeta: document.getElementById('stat-meta'),
+        statEsc: document.getElementById('stat-esc'),
+      };
+
+      const simContext = elements.simCanvas.getContext('2d');
+      const graphContext = elements.graphCanvas.getContext('2d');
+
+      const sliderBindings = [
+        { key: 'reproK', input: elements.sliderReproK, label: elements.labelReproK, parse: (v) => Number(v) },
+        { key: 'regenK', input: elements.sliderRegenK, label: elements.labelRegenK, parse: (v) => Math.round(Number(v) * 10) / 10 },
+        { key: 'killBase', input: elements.sliderKillBase, label: elements.labelKillBase, parse: (v) => Math.round(Number(v) * 100) / 100 },
+        { key: 'carnMeta', input: elements.sliderCarnMeta, label: elements.labelCarnMeta, parse: (v) => Math.round(Number(v) * 10000) / 10000 },
+      ];
+
+      function syncSlidersFromState() {
+        sliderBindings.forEach(({ key, input, label }) => {
+          input.value = state.parameters[key];
+          label.textContent = state.parameters[key];
+        });
+      }
+
+      function bindSliders() {
+        sliderBindings.forEach(({ key, input, label, parse }) => {
+          input.addEventListener('input', () => {
+            state.parameters[key] = parse(input.value);
+            label.textContent = state.parameters[key];
+          });
+        });
+      }
+
+      function createWorld() {
+        const { worldWidth, worldHeight } = CONFIG;
+        const world = Array.from({ length: worldHeight }, () =>
+          Array.from({ length: worldWidth }, () => ({ t: 0, fr: 0, mfr: 0, shallow: false }))
+        );
+
+        [[12, 8, 5], [63, 12, 6], [45, 38, 7], [18, 40, 5]].forEach(([cx, cy, r]) => {
+          for (let y = Math.max(0, cy - r - 2); y <= Math.min(worldHeight - 1, cy + r + 2); y++) {
+            for (let x = Math.max(0, cx - r - 2); x <= Math.min(worldWidth - 1, cx + r + 2); x++) {
+              const distortedRadius = r * (0.78 + Math.sin(x * 3.7 + y * 2.9) * 0.22);
+              if (Math.hypot(x - cx, y - cy) < distortedRadius) {
+                world[y][x].t = TILE.WATER;
+              }
+            }
+          }
+        });
+
+        let riverY = 24;
+        for (let x = 0; x < worldWidth; x++) {
+          riverY += Math.sin(x * 0.18) * 0.9 + Math.sin(x * 0.41 + 1.2) * 0.35;
+          riverY = Math.max(5, Math.min(worldHeight - 5, riverY));
+          for (let offset = -1; offset <= 1; offset++) {
+            const y = Math.round(riverY) + offset;
+            if (y >= 0 && y < worldHeight) world[y][x].t = TILE.WATER;
+          }
+        }
+
+        for (let y = 0; y < worldHeight; y++) {
+          for (let x = 0; x < worldWidth; x++) {
+            if (world[y][x].t !== TILE.GRASS) continue;
+            const noise = (Math.sin(x * 0.29 + y * 0.71) * Math.cos(x * 0.51 - y * 0.38) + 1) * 0.5;
+            if (noise > 0.71) world[y][x].t = TILE.FOREST;
+          }
+        }
+
+        for (let y = 0; y < worldHeight; y++) {
+          for (let x = 0; x < worldWidth; x++) {
+            if (world[y][x].t === TILE.GRASS && Math.random() < 0.043) {
+              world[y][x].t = TILE.FRUIT;
+              world[y][x].mfr = 5;
+              world[y][x].fr = Math.random() * 5;
+            }
+          }
+        }
+
+        for (let y = 0; y < worldHeight; y++) {
+          for (let x = 0; x < worldWidth; x++) {
+            if (world[y][x].t !== TILE.WATER) continue;
+            world[y][x].shallow = cardinalDirections().some(([dx, dy]) => {
+              const nx = x + dx;
+              const ny = y + dy;
+              return inBounds(nx, ny) && world[ny][nx].t !== TILE.WATER;
+            });
+          }
+        }
+
+        return world;
+      }
+
+      function inBounds(x, y) {
+        return x >= 0 && x < CONFIG.worldWidth && y >= 0 && y < CONFIG.worldHeight;
+      }
+
+      function cardinalDirections() {
+        return [[-1, 0], [1, 0], [0, -1], [0, 1]];
+      }
+
+      function isPassable(world, x, y) {
+        if (!inBounds(x, y)) return false;
+        const cell = world[y][x];
+        return cell.t !== TILE.WATER || cell.shallow;
+      }
+
+      function isWet(world, x, y) {
+        const cell = world[y]?.[x];
+        if (cell?.t === TILE.WATER) return true;
+        return cardinalDirections().some(([dx, dy]) => {
+          const nx = x + dx;
+          const ny = y + dy;
+          return inBounds(nx, ny) && world[ny][nx].t === TILE.WATER;
+        });
+      }
+
+      function randomLandCell(world) {
+        let x, y;
+        do {
+          x = 1 + Math.random() * (CONFIG.worldWidth - 2);
+          y = 1 + Math.random() * (CONFIG.worldHeight - 2);
+        } while (!isPassable(world, Math.floor(x), Math.floor(y)));
+        return [x, y];
+      }
+
+      function createAgent(type, x, y) {
+        return {
+          id: agentIdSequence++,
+          type,
+          x,
+          y,
+          hunger: Math.random() * 0.3,
+          thirst: Math.random() * 0.3,
+          fatigue: 0.1,
+          fear: 0,
+          beh: CONFIG.behaviors.WANDER,
+          tx: null,
+          ty: null,
+          vx: rnd(),
+          vy: rnd(),
+          wt: 20,
+          spd: type === 'h' ? 0.22 + Math.random() * 0.1 : 0.32 + Math.random() * 0.12,
+          sz: type === 'h' ? 3 + Math.floor(Math.random() * 2) : 4 + Math.floor(Math.random() * 2),
+          M: 0.2 + Math.random() * 0.2,
+          H: 0,
+          alive: true,
+          age: 0,
+          repro: Math.random() * 200,
+          lf: 0,
+          stuckCount: 0,
+          lastX: x,
+          lastY: y,
+        };
+      }
+
+      function escapeStuck(agent, world) {
+        const offset = Math.random() * Math.PI * 2;
+        for (let i = 0; i < 16; i++) {
+          const angle = offset + i * (Math.PI * 2 / 16);
+          const ex = agent.x + Math.cos(angle) * 7;
+          const ey = agent.y + Math.sin(angle) * 7;
+          if (isPassable(world, Math.floor(ex), Math.floor(ey))) {
+            agent.vx = Math.cos(angle) * 1.5;
+            agent.vy = Math.sin(angle) * 1.5;
+            return;
+          }
+        }
+        agent.vx = rnd() * 2;
+        agent.vy = rnd() * 2;
+      }
+
+      function chooseLocalStep(agent, world, nearestFood, nearestWater, nearestPredator, nearestPrey) {
+        const dirs = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1],[0,-1],[1,-1]];
+        const isHerbivore = agent.type === 'h';
+        let best = null;
+        let bestScore = -Infinity;
+        let secondBestScore = -Infinity;
+
+        for (const [dx, dy] of dirs) {
+          const nx = agent.x + dx;
+          const ny = agent.y + dy;
+          const gx = Math.floor(nx);
+          const gy = Math.floor(ny);
+          if (!isPassable(world, gx, gy)) continue;
+          const cell = world[gy]?.[gx];
+          if (!cell) continue;
+
+          let score = 0;
+          const dlen = Math.hypot(dx, dy) || 1;
+          const dirX = dx / dlen;
+          const dirY = dy / dlen;
+
+          if (isHerbivore) {
+            if (nearestFood) {
+              const d = Math.hypot(nx - nearestFood.x, ny - nearestFood.y);
+              score += (1 / (d + 1e-6)) * (0.9 + agent.hunger * 2.2);
+            }
+            if (nearestWater) {
+              const d = Math.hypot(nx - nearestWater.x, ny - nearestWater.y);
+              score += (1 / (d + 1e-6)) * (0.8 + agent.thirst * 2.0);
+            }
+            if (nearestPredator) {
+              const d = Math.hypot(nx - nearestPredator.x, ny - nearestPredator.y);
+              score += d * (0.8 + agent.fear * 2.8);
+            }
+          } else {
+            if (nearestPrey) {
+              const d = Math.hypot(nx - nearestPrey.x, ny - nearestPrey.y);
+              score += (1 / (d + 1e-6)) * (0.8 + agent.hunger * 2.2);
+            }
+            if (nearestWater) {
+              const d = Math.hypot(nx - nearestWater.x, ny - nearestWater.y);
+              score += (1 / (d + 1e-6)) * (0.7 + agent.thirst * 1.8);
+            }
+          }
+
+          if (cell.t === TILE.FOREST) score -= 0.25;
+          if (cell.t === TILE.WATER && cell.shallow) score -= 0.15;
+
+          let wallNear = 0;
+          for (let oy = -1; oy <= 1; oy++) {
+            for (let ox = -1; ox <= 1; ox++) {
+              if (ox === 0 && oy === 0) continue;
+              const tx = gx + ox;
+              const ty = gy + oy;
+              if (!inBounds(tx, ty) || !isPassable(world, tx, ty)) wallNear++;
+            }
+          }
+          score -= wallNear * 0.18;
+
+          const vlen = Math.hypot(agent.vx, agent.vy) || 1;
+          const inertia = ((agent.vx / vlen) * dirX + (agent.vy / vlen) * dirY) * 0.65;
+          score += inertia;
+
+          if (agent.commitX !== undefined && agent.commitY !== undefined) {
+            const commit = (agent.commitX * dirX + agent.commitY * dirY) * 0.55;
+            score += commit;
+          }
+
+          if (score > bestScore) {
+            secondBestScore = bestScore;
+            bestScore = score;
+            best = { dx: dirX, dy: dirY };
+          } else if (score > secondBestScore) {
+            secondBestScore = score;
+          }
+        }
+
+        if (best) {
+          const margin = bestScore - secondBestScore;
+          best.margin = Number.isFinite(margin) ? margin : 0;
+        }
+
+        return best;
+      }
+
+      function tickCore(agents, world, params, runtimeState) {
+        const { reproK, regenK, killBase, carnMeta } = params;
+        const sensingRange = 9;
+        const chaseRange = 13;
+        const herbivoreCountBefore = agents.filter((a) => a.alive && a.type === 'h').length;
+        const liveAgents = agents.filter((a) => a.alive);
+        const newborns = [];
+        let escapedThisTick = 0;
+
+        for (const agent of liveAgents) {
+          if (!agent.alive) continue;
+
+          agent.age++;
+          agent.repro++;
+          if (agent.lf > 0) agent.lf--;
+
+          const isHerbivore = agent.type === 'h';
+          agent.hunger = Math.min(1, agent.hunger + (isHerbivore ? 0.00078 : carnMeta));
+          agent.thirst = Math.min(1, agent.thirst + 0.00095);
+          agent.fatigue = Math.max(0, Math.min(1, agent.fatigue + 0.00045 + (agent.beh === CONFIG.behaviors.REST ? -0.003 : 0)));
+
+          if (agent.hunger >= 1 || agent.thirst >= 1) {
+            agent.alive = false;
+            if (runtimeState.D) {
+              if (isHerbivore && agent.hunger >= 1) runtimeState.D.hs++;
+              if (isHerbivore && agent.thirst >= 1) runtimeState.D.ht++;
+              if (!isHerbivore && agent.hunger >= 1) runtimeState.D.cs++;
+              if (!isHerbivore && agent.thirst >= 1) runtimeState.D.ct++;
+            }
+            continue;
+          }
+
+          const gx = Math.floor(agent.x);
+          const gy = Math.floor(agent.y);
+
+          let nearestFood = null, foodDist = 99;
+          let nearestWater = null, waterDist = 99;
+          let nearestPredator = null, predatorDist = 99;
+          let nearestPrey = null, preyDist = 99;
+
+          for (let dy = -sensingRange; dy <= sensingRange; dy++) {
+            for (let dx = -sensingRange; dx <= sensingRange; dx++) {
+              const nx = gx + dx;
+              const ny = gy + dy;
+              if (!inBounds(nx, ny)) continue;
+              const distance = Math.hypot(dx, dy);
+              if (distance > sensingRange) continue;
+              const cell = world[ny][nx];
+
+              if (isHerbivore && (cell.t === TILE.GRASS || (cell.t === TILE.FRUIT && cell.fr > 0.5)) && distance < foodDist) {
+                foodDist = distance;
+                nearestFood = { x: nx + 0.5, y: ny + 0.5 };
+              }
+              if (cell.t === TILE.WATER && distance < waterDist) {
+                waterDist = distance;
+                nearestWater = { x: nx + 0.5, y: ny + 0.5 };
+              }
+            }
+          }
+
+          for (const other of liveAgents) {
+            if (other === agent || !other.alive) continue;
+            const d = Math.hypot(other.x - agent.x, other.y - agent.y);
+            if (d > chaseRange) continue;
+
+            if (isHerbivore && other.type === 'c' && d < predatorDist) {
+              predatorDist = d;
+              nearestPredator = other;
+            }
+            if (!isHerbivore && other.type === 'h' && d < preyDist) {
+              preyDist = d;
+              nearestPrey = other;
+            }
+          }
+
+          if (isHerbivore) {
+            const threat = nearestPredator ? Math.max(0, (1 - predatorDist / chaseRange) * 1.6) : 0;
+            agent.fear = agent.fear * 0.82 + threat * 0.18;
+          }
+
+          const utilities = [0, 0, 0, 0, 0, 0];
+          const mFactor = 1 / (1 + (agent.M || 0.3) * 1.5);
+
+          if (isHerbivore) {
+            utilities[CONFIG.behaviors.FLEE] = agent.fear * 3;
+            utilities[CONFIG.behaviors.FEED] = Math.pow(agent.hunger, 1.5) * (nearestFood ? 1.8 : 1);
+            utilities[CONFIG.behaviors.DRINK] = Math.pow(agent.thirst, 1.5) * (nearestWater ? 1.8 : 1);
+            utilities[CONFIG.behaviors.REST] = agent.fatigue * 0.7;
+            utilities[CONFIG.behaviors.WANDER] = 0.05;
+          } else {
+            utilities[CONFIG.behaviors.HUNT] = (0.2 + agent.hunger * 0.8) * (nearestPrey ? 2.0 : 0.4);
+            utilities[CONFIG.behaviors.DRINK] = Math.pow(agent.thirst, 1.5) * (nearestWater ? 1.8 : 1);
+            utilities[CONFIG.behaviors.REST] = agent.fatigue * 0.7;
+            utilities[CONFIG.behaviors.WANDER] = 0.1;
+          }
+
+          [0.06, 0.04, 0.04, 0.015, 0.035, 0.03].forEach((sigma, i) => {
+            utilities[i] = Math.max(0, utilities[i] + rnd() * 2 * sigma * mFactor);
+          });
+
+          let bestBehavior = CONFIG.behaviors.WANDER;
+          let bestUtility = 0;
+          for (let i = 0; i < utilities.length; i++) {
+            if (utilities[i] > bestUtility) {
+              bestUtility = utilities[i];
+              bestBehavior = i;
+            }
+          }
+
+          const mismatch = bestBehavior !== agent.beh ? Math.max(0, utilities[bestBehavior] - utilities[agent.beh]) : 0;
+          agent.H = Math.max(0, agent.H + mismatch * mismatch - 0.09 * agent.H);
+          if (agent.H > 0.25 * (1 + agent.M) + (Math.random() - 0.5) * 0.04 && bestBehavior !== agent.beh) {
+            agent.beh = bestBehavior;
+            agent.H = 0;
+            agent.lf = 10;
+            agent.M = Math.min(0.9, agent.M + 0.05);
+          }
+          agent.M = Math.max(0.1, agent.M - 0.0005);
+
+          const currentCellX = Math.floor(agent.x);
+          const currentCellY = Math.floor(agent.y);
+          const currentCell = world[currentCellY]?.[currentCellX];
+          const onFood = agent.beh === CONFIG.behaviors.FEED && currentCell && (currentCell.t === TILE.GRASS || (currentCell.t === TILE.FRUIT && currentCell.fr > 0.5)) && agent.hunger > 0.08;
+          const onWater = agent.beh === CONFIG.behaviors.DRINK && isWet(world, currentCellX, currentCellY) && agent.thirst > 0.08;
+
+          if (onFood || onWater) {
+            const nextX = Math.max(0.1, Math.min(CONFIG.worldWidth - 0.1, agent.x + rnd() * 0.08));
+            const nextY = Math.max(0.1, Math.min(CONFIG.worldHeight - 0.1, agent.y + rnd() * 0.08));
+            if (isPassable(world, Math.floor(nextX), Math.floor(nextY))) {
+              agent.x = nextX;
+              agent.y = nextY;
+            }
+            agent.stuckCount = 0;
+            agent.lastX = agent.x;
+            agent.lastY = agent.y;
+          } else if (agent.beh === CONFIG.behaviors.REST) {
+            agent.stuckCount = 0;
+            agent.lastX = agent.x;
+            agent.lastY = agent.y;
+          } else {
+            const panic = isHerbivore && agent.beh === CONFIG.behaviors.FLEE ? Math.min(1, agent.fear) : 0;
+            const moveSpeed = isHerbivore
+              ? (agent.beh === CONFIG.behaviors.FLEE ? agent.spd * (1.25 + panic * 0.9) : agent.spd * 0.9)
+              : (agent.beh === CONFIG.behaviors.HUNT ? agent.spd * 1.3 : agent.spd * 0.8);
+
+            const step = chooseLocalStep(agent, world, nearestFood, nearestWater, nearestPredator, nearestPrey);
+            if (step) {
+              const margin = step.margin ?? 0;
+              const blendToStep = margin < 0.12 ? 0.18 : 0.45;
+              agent.commitX = (agent.commitX ?? step.dx) * 0.72 + step.dx * 0.28;
+              agent.commitY = (agent.commitY ?? step.dy) * 0.72 + step.dy * 0.28;
+              const commitLen = Math.hypot(agent.commitX, agent.commitY) || 1;
+              agent.commitX /= commitLen;
+              agent.commitY /= commitLen;
+
+              agent.vx = agent.vx * (1 - blendToStep) + agent.commitX * blendToStep;
+              agent.vy = agent.vy * (1 - blendToStep) + agent.commitY * blendToStep;
+              const velocityLength = Math.hypot(agent.vx, agent.vy) || 1;
+              const nextX = agent.x + (agent.vx / velocityLength) * moveSpeed;
+              const nextY = agent.y + (agent.vy / velocityLength) * moveSpeed;
+              const nextGX = Math.max(0, Math.min(CONFIG.worldWidth - 1, Math.floor(nextX)));
+              const nextGY = Math.max(0, Math.min(CONFIG.worldHeight - 1, Math.floor(nextY)));
+              if (isPassable(world, nextGX, nextGY)) {
+                agent.x = Math.max(0.1, Math.min(CONFIG.worldWidth - 0.1, nextX));
+                agent.y = Math.max(0.1, Math.min(CONFIG.worldHeight - 0.1, nextY));
+              } else {
+                agent.commitX = -agent.commitX;
+                agent.commitY = -agent.commitY;
+                agent.vx = agent.commitX + rnd() * 0.3;
+                agent.vy = agent.commitY + rnd() * 0.3;
+              }
+            } else {
+              agent.vx = agent.vx * 0.6 + rnd() * 0.4;
+              agent.vy = agent.vy * 0.6 + rnd() * 0.4;
+            }
+
+            agent.tx = null;
+            agent.ty = null;
+            agent.fatigue = Math.min(1, agent.fatigue + 0.0002 + (agent.beh === CONFIG.behaviors.FLEE ? 0.0012 : 0));
+
+            const moved = Math.hypot(agent.x - agent.lastX, agent.y - agent.lastY);
+            if (moved < 0.09) {
+              agent.stuckCount++;
+              if (agent.stuckCount >= 28) {
+                escapeStuck(agent, world);
+                agent.stuckCount = 0;
+                escapedThisTick++;
+                if (runtimeState.escapeCount !== undefined) runtimeState.escapeCount++;
+              }
+            } else {
+              agent.stuckCount = 0;
+              agent.lastX = agent.x;
+              agent.lastY = agent.y;
+            }
+          }
+
+          const cellX = Math.floor(agent.x);
+          const cellY = Math.floor(agent.y);
+          if (inBounds(cellX, cellY)) {
+            const cell = world[cellY][cellX];
+            if (agent.beh === CONFIG.behaviors.FEED) {
+              if (cell.t === TILE.GRASS) {
+                agent.hunger = Math.max(0, agent.hunger - 0.007);
+              } else if (cell.t === TILE.FRUIT && cell.fr > 0) {
+                agent.hunger = Math.max(0, agent.hunger - 0.009);
+                cell.fr = Math.max(0, cell.fr - 0.007);
+              }
+            }
+            if (agent.beh === CONFIG.behaviors.DRINK && isWet(world, cellX, cellY)) {
+              agent.thirst = Math.max(0, agent.thirst - 0.012);
+            }
+            if (agent.beh === CONFIG.behaviors.HUNT && nearestPrey && Math.hypot(agent.x - nearestPrey.x, agent.y - nearestPrey.y) < 1.5) {
+              const distance = Math.hypot(agent.x - nearestPrey.x, agent.y - nearestPrey.y);
+              const killChance = killBase + (1 - distance / 1.5) * 0.35;
+              if (Math.random() < killChance) {
+                nearestPrey.alive = false;
+                if (runtimeState.D) runtimeState.D.hp++;
+                agent.hunger = Math.max(0, agent.hunger - 0.45);
+                agent.repro += 50;
+              } else {
+                nearestPrey.fear = Math.min(1.6, nearestPrey.fear + 0.8);
+              }
+            }
+          }
+
+          const reproductionThreshold = isHerbivore
+            ? Math.max(120, 380 - Math.max(0, 25 - herbivoreCountBefore) * reproK)
+            : 380;
+
+          const sameTypeCount = liveAgents.filter((a) => a.type === agent.type).length;
+          const typeLimit = isHerbivore ? 40 : 12;
+          if (agent.repro > reproductionThreshold && agent.hunger < 0.45 && agent.thirst < 0.45 && sameTypeCount < typeLimit) {
+            agent.repro = 0;
+            newborns.push(
+              createAgent(
+                agent.type,
+                Math.max(0.1, Math.min(CONFIG.worldWidth - 0.1, agent.x + rnd() * 2)),
+                Math.max(0.1, Math.min(CONFIG.worldHeight - 0.1, agent.y + rnd() * 2))
+              )
+            );
+          }
+        }
+
+        return {
+          newAgents: [...agents.filter((a) => a.alive), ...newborns],
+          escaped: escapedThisTick,
+        };
+      }
+
+      function runScenario(worldTemplate, params, maxTicks) {
+        let agents = [];
+        for (let i = 0; i < CONFIG.initialHerbivores; i++) {
+          const [x, y] = randomLandCell(worldTemplate);
+          agents.push(createAgent('h', x, y));
+        }
+        for (let i = 0; i < CONFIG.initialCarnivores; i++) {
+          const [x, y] = randomLandCell(worldTemplate);
+          agents.push(createAgent('c', x, y));
+        }
+
+        const world = worldTemplate.map((row) => row.map((cell) => ({ ...cell })));
+        let metaCount = 0;
+        const herbivoreHistory = [];
+        const carnivoreHistory = [];
+
+        for (let tick = 0; tick < maxTicks; tick++) {
+          if (tick % 80 === 0) {
+            const herbivoreDensity = Math.min(1, agents.filter((a) => a.alive && a.type === 'h').length / 30);
+            const regen = 0.7 * (1 + (1 - herbivoreDensity) * params.regenK);
+            for (let y = 0; y < CONFIG.worldHeight; y++) {
+              for (let x = 0; x < CONFIG.worldWidth; x++) {
+                const cell = world[y][x];
+                if (cell.t === TILE.FRUIT && cell.fr < cell.mfr) {
+                  cell.fr = Math.min(cell.mfr, cell.fr + regen);
+                }
+              }
+            }
+          }
+
+          agents = tickCore(agents, world, params, {}).newAgents;
+
+          const herbivoreCount = agents.filter((a) => a.type === 'h').length;
+          const carnivoreCount = agents.filter((a) => a.type === 'c').length;
+
+          if (herbivoreCount <= 1) {
+            for (let i = 0; i < 5; i++) {
+              const [x, y] = randomLandCell(world);
+              agents.push(createAgent('h', x, y));
+            }
+            metaCount++;
+          }
+          if (carnivoreCount === 0) {
+            for (let i = 0; i < 2; i++) {
+              const [x, y] = randomLandCell(world);
+              agents.push(createAgent('c', x, y));
+            }
+            metaCount++;
+          }
+
+          if (tick % 20 === 0) {
+            herbivoreHistory.push(herbivoreCount);
+            carnivoreHistory.push(carnivoreCount);
+          }
+
+          if (herbivoreCount === 0 && carnivoreCount === 0 && tick > 100) break;
+        }
+
+        const survived = (herbivoreHistory.at(-1) || 0) > 0 && (carnivoreHistory.at(-1) || 0) > 0;
+        const hMin = herbivoreHistory.length ? Math.min(...herbivoreHistory) : 0;
+        const hMean = herbivoreHistory.length ? Math.round(herbivoreHistory.reduce((a, b) => a + b, 0) / herbivoreHistory.length) : 0;
+        const cMean = carnivoreHistory.length ? Math.round((carnivoreHistory.reduce((a, b) => a + b, 0) / carnivoreHistory.length) * 10) / 10 : 0;
+
+        let score = 0;
+        if (survived) {
+          score = Math.round((1 / (1 + metaCount * 2)) * (hMean > 0 ? hMin / hMean : 0) * Math.min(1, cMean / 3) * 1000) / 1000;
+        }
+
+        return { survived, metaCount, hMin, hMean, cMean, score };
+      }
+
+      function generateScenarios() {
+        const scenarios = [];
+        const grid = CONFIG.scenarioGrid;
+        for (const reproK of grid.reproK) {
+          for (const regenK of grid.regenK) {
+            for (const killBase of grid.killBase) {
+              for (const carnMeta of grid.carnMeta) {
+                scenarios.push({ reproK, regenK, killBase, carnMeta });
+              }
+            }
+          }
+        }
+        return scenarios;
+      }
+
+      function renderResultTable() {
+        if (!state.results.length) return;
+
+        elements.emptyMessage.style.display = 'none';
+        const sorted = [...state.results].sort((a, b) => {
+          if (a[state.sortKey] < b[state.sortKey]) return -1 * state.sortDirection;
+          if (a[state.sortKey] > b[state.sortKey]) return  1 * state.sortDirection;
+          return 0;
+        });
+
+        elements.resultTableBody.innerHTML = sorted.slice(0, 12).map((result, sortedIndex) => {
+          const originalIndex = state.results.indexOf(result);
+          const isBest = sortedIndex === 0 && state.sortKey === 'score';
+          return `
+            <tr class="${isBest ? 'best' : ''}" data-result-index="${originalIndex}">
+              <td>${result.score.toFixed(3)}</td>
+              <td>${result.reproK}</td>
+              <td>${result.regenK}</td>
+              <td>${result.killBase}</td>
+              <td>${result.carnMeta}</td>
+              <td>${result.metaCount}</td>
+              <td>${result.hMin}</td>
+              <td><span class="badge ${result.survived ? 'ok' : 'ng'}">${result.survived ? '✓' : '✗'}</span></td>
+            </tr>
+          `;
+        }).join('');
+      }
+
+      function selectResult(index) {
+        const result = state.results[index];
+        if (!result) return;
+        state.selectedResultIndex = index;
+        Object.assign(state.parameters, {
+          reproK: result.reproK,
+          regenK: result.regenK,
+          killBase: result.killBase,
+          carnMeta: result.carnMeta,
+        });
+        syncSlidersFromState();
+        elements.currentScore.textContent = `スコア: ${result.score.toFixed(3)}　介入: ${result.metaCount}　hMin: ${result.hMin}`;
+        elements.applyButton.disabled = false;
+        renderResultTable();
+      }
+
+      function autoSelectBestResult() {
+        const best = state.results
+          .filter((r) => r.survived)
+          .sort((a, b) => b.score - a.score)[0];
+        if (!best) return;
+        selectResult(state.results.indexOf(best));
+      }
+
+      function resetSearchUI() {
+        elements.searchProgressBar.style.width = '0%';
+        elements.searchProgressText.textContent = '0/81';
+        elements.searchStatus.textContent = '待機中';
+        elements.searchButton.disabled = false;
+        elements.searchButton.textContent = '▶ 検索';
+      }
+
+      function startSearch() {
+        state.results = [];
+        state.selectedResultIndex = null;
+        elements.resultTableBody.innerHTML = '';
+        elements.emptyMessage.style.display = 'block';
+        elements.currentScore.textContent = '';
+        elements.applyButton.disabled = true;
+
+        const scenarios = generateScenarios();
+        const total = scenarios.length;
+        const world = createWorld();
+        let index = 0;
+
+        elements.searchButton.disabled = true;
+        elements.quickStartButton.disabled = true;
+        elements.searchButton.textContent = '実行中…';
+
+        const step = () => {
+          if (index >= total) {
+            elements.searchButton.disabled = false;
+            elements.quickStartButton.disabled = false;
+            elements.searchButton.textContent = '▶ 再検索';
+            elements.searchStatus.textContent = `完了 ${total}件`;
+            renderResultTable();
+            autoSelectBestResult();
+            return;
+          }
+
+          for (let batch = 0; batch < 4 && index < total; batch++, index++) {
+            const scenario = scenarios[index];
+            const outcome = runScenario(world, scenario, CONFIG.searchMaxTicks);
+            state.results.push({ ...scenario, ...outcome });
+          }
+
+          const progress = Math.round((index / total) * 100);
+          elements.searchProgressBar.style.width = `${progress}%`;
+          elements.searchProgressText.textContent = `${index}/${total}`;
+          elements.searchStatus.textContent = `${progress}%`;
+          renderResultTable();
+          setTimeout(step, 0);
+        };
+
+        step();
+      }
+
+      function resetSimulationState() {
+        const sim = state.simulation;
+        sim.tick = 0;
+        sim.running = true;
+        sim.history = { h: [], c: [], meta: [] };
+        sim.deathStats = { hs: 0, ht: 0, hp: 0, cs: 0, ct: 0, meta: 0, esc: 0 };
+        sim.world = createWorld();
+        sim.agents = [];
+        agentIdSequence = 0;
+
+        for (let i = 0; i < CONFIG.initialHerbivores; i++) {
+          const [x, y] = randomLandCell(sim.world);
+          sim.agents.push(createAgent('h', x, y));
+        }
+        for (let i = 0; i < CONFIG.initialCarnivores; i++) {
+          const [x, y] = randomLandCell(sim.world);
+          sim.agents.push(createAgent('c', x, y));
+        }
+      }
+
+      function runSimulationTick() {
+        const sim = state.simulation;
+        sim.tick++;
+
+        const herbivoreCountBefore = sim.agents.filter((a) => a.alive && a.type === 'h').length;
+        if (sim.tick % 80 === 0) {
+          const herbivoreDensity = Math.min(1, herbivoreCountBefore / 30);
+          const regen = 0.7 * (1 + (1 - herbivoreDensity) * state.parameters.regenK);
+          for (let y = 0; y < CONFIG.worldHeight; y++) {
+            for (let x = 0; x < CONFIG.worldWidth; x++) {
+              const cell = sim.world[y][x];
+              if (cell.t === TILE.FRUIT && cell.fr < cell.mfr) {
+                cell.fr = Math.min(cell.mfr, cell.fr + regen);
+              }
+            }
+          }
+        }
+
+        const runtimeState = { D: sim.deathStats, escapeCount: 0 };
+        const result = tickCore(sim.agents, sim.world, state.parameters, runtimeState);
+        sim.agents = result.newAgents;
+        sim.deathStats.esc += result.escaped;
+
+        const herbivoreCount = sim.agents.filter((a) => a.type === 'h').length;
+        const carnivoreCount = sim.agents.filter((a) => a.type === 'c').length;
+        let intervened = false;
+
+        if (herbivoreCount <= 1) {
+          for (let i = 0; i < 5; i++) {
+            const [x, y] = randomLandCell(sim.world);
+            sim.agents.push(createAgent('h', x, y));
+          }
+          intervened = true;
+        }
+        if (carnivoreCount === 0) {
+          for (let i = 0; i < 2; i++) {
+            const [x, y] = randomLandCell(sim.world);
+            sim.agents.push(createAgent('c', x, y));
+          }
+          intervened = true;
+        }
+        if (intervened) sim.deathStats.meta++;
+
+        if (sim.tick % 20 === 0) {
+          sim.history.h.push(herbivoreCount);
+          sim.history.c.push(carnivoreCount);
+          sim.history.meta.push(intervened ? 1 : 0);
+          if (sim.history.h.length > CONFIG.historyLimit) {
+            sim.history.h.shift();
+            sim.history.c.shift();
+            sim.history.meta.shift();
+          }
+        }
+      }
+
+      function drawSimulation() {
+        const sim = state.simulation;
+        const ctx = simContext;
+        const { worldWidth, worldHeight, cellSize } = CONFIG;
+
+        for (let y = 0; y < worldHeight; y++) {
+          for (let x = 0; x < worldWidth; x++) {
+            const cell = sim.world[y][x];
+            ctx.fillStyle =
+              cell.t === TILE.GRASS ? '#3d7a44' :
+              cell.t === TILE.WATER ? (cell.shallow ? '#2a6ae0' : '#1a55dd') :
+              cell.t === TILE.FOREST ? '#1a4a1a' :
+              (cell.fr > 2.5 ? '#2a7032' : '#245428');
+            ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+
+            if (cell.t === TILE.FRUIT && cell.fr > 0.5) {
+              ctx.fillStyle = `rgba(255,160,0,${(cell.fr / cell.mfr) * 0.85})`;
+              ctx.beginPath();
+              ctx.arc(x * cellSize + 5, y * cellSize + 5, 1.8, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        }
+
+        for (const agent of sim.agents) {
+          if (!agent.alive) continue;
+          const px = agent.x * cellSize;
+          const py = agent.y * cellSize;
+
+          if (agent.stuckCount > 10) {
+            ctx.fillStyle = `rgba(255,220,0,${Math.min(0.4, (agent.stuckCount / 28) * 0.4)})`;
+            ctx.beginPath();
+            ctx.arc(px, py, agent.sz + 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          if ((agent.H || 0) > 0.08) {
+            ctx.fillStyle = `rgba(255,80,0,${Math.min(0.5, (agent.H || 0) * 0.28)})`;
+            ctx.beginPath();
+            ctx.arc(px, py, agent.sz + 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          ctx.fillStyle = agent.type === 'h' ? '#55cc66' : '#dd4433';
+          ctx.beginPath();
+          ctx.arc(px, py, agent.sz, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = CONFIG.behaviorColors[agent.beh];
+          ctx.beginPath();
+          ctx.arc(px, py, 1.8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawHistoryGraph() {
+        const sim = state.simulation;
+        const ctx = graphContext;
+        const width = elements.graphCanvas.width;
+        const height = elements.graphCanvas.height;
+        ctx.clearRect(0, 0, width, height);
+
+        const n = sim.history.h.length;
+        if (n < 2) return;
+
+        const maxH = Math.max(40, ...sim.history.h, ...sim.history.c.map((v) => v * 4)) || 1;
+        const xScale = width / CONFIG.historyLimit;
+
+        for (let i = 0; i < n; i++) {
+          if (sim.history.meta[i]) {
+            ctx.fillStyle = 'rgba(68,136,255,0.25)';
+            ctx.fillRect(i * xScale, 0, xScale + 1, height);
+          }
+        }
+
+        ctx.beginPath();
+        ctx.strokeStyle = '#55cc66';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < n; i++) {
+          const y = height - ((sim.history.h[i] / maxH) * 64 + 3);
+          if (i === 0) ctx.moveTo(i * xScale, y);
+          else ctx.lineTo(i * xScale, y);
+        }
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.strokeStyle = '#dd4433';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < n; i++) {
+          const y = height - (((sim.history.c[i] * 4) / maxH) * 64 + 3);
+          if (i === 0) ctx.moveTo(i * xScale, y);
+          else ctx.lineTo(i * xScale, y);
+        }
+        ctx.stroke();
+      }
+
+      function updateSimulationStatsUI() {
+        const sim = state.simulation;
+        const herbivoreCount = sim.agents.filter((a) => a.type === 'h').length;
+        const carnivoreCount = sim.agents.filter((a) => a.type === 'c').length;
+
+        elements.populationDisplay.textContent = `草食:${herbivoreCount} 肉食:${carnivoreCount} tick:${sim.tick}`;
+        elements.stuckDisplay.textContent = `escape:${sim.deathStats.esc}`;
+
+        elements.statHs.textContent = sim.deathStats.hs;
+        elements.statHt.textContent = sim.deathStats.ht;
+        elements.statHp.textContent = sim.deathStats.hp;
+        elements.statCs.textContent = sim.deathStats.cs;
+        elements.statCt.textContent = sim.deathStats.ct;
+        elements.statMeta.textContent = sim.deathStats.meta;
+        elements.statEsc.textContent = sim.deathStats.esc;
+      }
+
+      function quickStartSimulation() {
+        state.selectedResultIndex = null;
+        elements.currentScore.textContent = '手動パラメータで直接実行';
+        applyParametersAndStartSimulation();
+      }
+
+      function applyParametersAndStartSimulation() {
+        elements.appliedParameterChips.innerHTML = ['reproK', 'regenK', 'killBase', 'carnMeta']
+          .map((key) => `<span class="chip">${key}: ${state.parameters[key]}</span>`)
+          .join('');
+
+        elements.searchPhase.classList.add('hidden');
+        elements.simulationPhase.classList.remove('hidden');
+        resetSimulationState();
+        updateRunButtonUI();
+      }
+
+      function updateRunButtonUI() {
+        elements.runToggleButton.textContent = state.simulation.running ? '■ 実行中' : '▶ 再開';
+        elements.runToggleButton.className = `button ${state.simulation.running ? 'stop' : 'go'}`;
+      }
+
+      function setSpeed(speed) {
+        state.simulation.speed = speed;
+        [elements.speed025, elements.speed05, elements.speed1, elements.speed2, elements.speed5].forEach((button) => button.classList.remove('active'));
+        if (speed === 0.25) elements.speed025.classList.add('active');
+        if (speed === 0.5) elements.speed05.classList.add('active');
+        if (speed === 1) elements.speed1.classList.add('active');
+        if (speed === 2) elements.speed2.classList.add('active');
+        if (speed === 5) elements.speed5.classList.add('active');
+      }
+
+      function bindEvents() {
+        bindSliders();
+        syncSlidersFromState();
+
+        elements.searchButton.addEventListener('click', startSearch);
+        elements.quickStartButton.addEventListener('click', quickStartSimulation);
+        elements.applyButton.addEventListener('click', applyParametersAndStartSimulation);
+        elements.backButton.addEventListener('click', () => {
+          elements.searchPhase.classList.remove('hidden');
+          elements.simulationPhase.classList.add('hidden');
+        });
+        elements.restartButton.addEventListener('click', () => {
+          resetSimulationState();
+          updateRunButtonUI();
+        });
+        elements.runToggleButton.addEventListener('click', () => {
+          state.simulation.running = !state.simulation.running;
+          updateRunButtonUI();
+        });
+
+        elements.speed025.addEventListener('click', () => setSpeed(0.25));
+        elements.speed05.addEventListener('click', () => setSpeed(0.5));
+        elements.speed1.addEventListener('click', () => setSpeed(1));
+        elements.speed2.addEventListener('click', () => setSpeed(2));
+        elements.speed5.addEventListener('click', () => setSpeed(5));
+
+        document.querySelectorAll('th[data-sort]').forEach((header) => {
+          header.addEventListener('click', () => {
+            const key = header.dataset.sort;
+            if (state.sortKey === key) state.sortDirection *= -1;
+            else {
+              state.sortKey = key;
+              state.sortDirection = -1;
+            }
+            renderResultTable();
+          });
+        });
+
+        elements.resultTableBody.addEventListener('click', (event) => {
+          const row = event.target.closest('tr[data-result-index]');
+          if (!row) return;
+          selectResult(Number(row.dataset.resultIndex));
+        });
+      }
+
+      function startRenderLoop() {
+        let frameCounter = 0;
+        let lastUiUpdateTs = 0;
+        const intervalMap = { 0.25: 12, 0.5: 6, 1: 3, 2: 2, 5: 1 };
+        const batchMap = { 0.25: 1, 0.5: 1, 1: 1, 2: 1, 5: 3 };
+
+        const loop = (timestamp) => {
+          requestAnimationFrame(loop);
+          frameCounter++;
+
+          const sim = state.simulation;
+          if (sim.world && sim.running && frameCounter % intervalMap[sim.speed] === 0) {
+            for (let i = 0; i < batchMap[sim.speed]; i++) {
+              runSimulationTick();
+            }
+          }
+
+          if (sim.world) {
+            drawSimulation();
+            drawHistoryGraph();
+          }
+
+          if (timestamp - lastUiUpdateTs > 120) {
+            lastUiUpdateTs = timestamp;
+            updateSimulationStatsUI();
+          }
+        };
+
+        requestAnimationFrame(loop);
+      }
+
+      bindEvents();
+      resetSearchUI();
+      setSpeed(1);
+      startRenderLoop();
+    })();
+  </script>
+</body>
+</html>

@@ -1,37 +1,94 @@
 # RDL Demos
 
-RDL（関係力学言語 / Relational Dynamics Language）をベースにした実験デモ集。  
-p5.js によるビジュアルシミュレーションと、CLIチャットボットで構成される。
+RDL（関係力学言語 / Relational Dynamics Language）をベースにした実験デモ集。
+ブラウザ上のビジュアルシミュレーションと、CLIチャットボットで構成される。
 
-**GitHub Pages:** https://hermannDegner.github.io/RDL_Demos/
+**GitHub Pages:** https://hermanndegner.github.io/RDL_Demos/
 
 理論ベース: [Limit-Space_Relational-Dynamics-Language](https://github.com/HermannDegner/Limit-Space_Relational-Dynamics-Language)
 
 ---
 
-## デモ一覧（p5.js / ブラウザ）
+## ブラウザデモ
 
-| フォルダ | タイトル | 概要 |
-|---------|---------|------|
-| [demo0/](demo0/) | p5.js sketch | 温度制御シミュレーション |
-| [demo1/](demo1/) | RDF v4 | 近傍セル評価移動 |
-| [demo2/](demo2/) | Non-Euclidean Warp Navigation | 迷路内熱場・フロー学習 |
-| [demo3/](demo3/) | RDF minimal world ver2 | 草・捕食者・被食者 |
-| [demo4/](demo4/) | RDF minimal world ver2.1 | 少数戦術・視覚/音センサー |
-| [demo5/](demo5/) | RDF minimal world ver3 | 水場追加・複合生存資源 |
-| [demo6/](demo6/) | RDF Rabbit Demo v3.1 | アクティブ脅威・アンカー行動 |
+番号は作成順や発展順と一致しなくなっていたため、内容を表すURLへ移した。
+旧 demo0〜demo6 は互換用の転送入口として残している。
+
+### 生態系・行動の発展系列
+
+同じ対象へ条件を加え、意味と行動がどう変わるかを見る系列。
+
+> 勾配世界 → 感覚制約 → 複合資源 → 能動的脅威 → 資源転移
+
+| 段階 | デモ | 焦点 | 旧URL |
+|---|---|---|---|
+| 1 | [勾配で動く最小生態系](demos/ecology-gradient-world/) | 草が食料と隠れ場を兼ね、覚醒状態によって意味が変わる | demo3 |
+| 2 | [感覚が制約された少数戦術](demos/ecology-limited-senses/) | 視覚・音・遮蔽を分離し、情報制約を加える | demo4 |
+| 3 | [複合資源による生存選択](demos/ecology-multi-resource/) | 水場を加え、空腹・渇き・危険を競合させる | demo5 |
+| 4 | [能動的脅威とアンカー行動](demos/rabbit-active-threat/) | 追跡する脅威に対する退避と資源確保 | demo6 |
+| 5 | [資源枯渇と即時転移](demos/rabbit-resource-relocation/) | 資源の転移により永続的な安全地帯を崩す | demo0 |
+
+### 探索・評価の再実装
+
+| デモ | 焦点 | 旧URL |
+|---|---|---|
+| [近傍セル評価とパラメータ探索](demos/ecology-parameter-search/) | 81条件を比較し、生存・介入・脱出から実行パラメータを選ぶ | demo1 |
+
+生態系系列と主題はつながっているが、コード上は格子モデルとして組み直した別実装。
+
+### 場と経路の学習
+
+| デモ | 焦点 | 旧URL |
+|---|---|---|
+| [Non-Euclidean Warp Navigation](demos/warp-navigation/) | 失敗を H_vec として場へ残し、フローから迷路内の経路を学ぶ | demo2 |
+
+これは生態系系列から独立した、場の学習と経路形成の実験。
+
+---
+
+## URL移行
+
+| 旧URL | 新URL |
+|---|---|
+| demo0/ | demos/rabbit-resource-relocation/ |
+| demo1/ | demos/ecology-parameter-search/ |
+| demo2/ | demos/warp-navigation/ |
+| demo3/ | demos/ecology-gradient-world/ |
+| demo4/ | demos/ecology-limited-senses/ |
+| demo5/ | demos/ecology-multi-resource/ |
+| demo6/ | demos/rabbit-active-threat/ |
+
+旧URLへアクセスすると、クエリ文字列とハッシュを保ったまま新URLへ転送される。
+
+## ディレクトリ構成
+
+~~~text
+RDL_Demos/
+├── index.html
+├── demos/
+│   ├── ecology-gradient-world/
+│   ├── ecology-limited-senses/
+│   ├── ecology-multi-resource/
+│   ├── rabbit-active-threat/
+│   ├── rabbit-resource-relocation/
+│   ├── ecology-parameter-search/
+│   └── warp-navigation/
+├── demo0/ ... demo6/       旧URLからの転送
+└── rdl_bot/                CLIチャットボット
+~~~
 
 ---
 
 ## rdl_bot（CLIチャットボット）
 
-RDL語彙でユーザーの入出力を構造化し、H蓄積 → leap → LLM学習 のサイクルで自律拡張するボット。
+RDL語彙でユーザーの入出力を構造化し、H蓄積 → leap → LLM問い合わせ → ノード学習の
+サイクルで自律拡張するボット。
 
-```bash
+~~~bash
 cd rdl_bot
 pip install -r requirements.txt
 py main.py
-```
+~~~
 
-APIキーなしでも動作する（手動 seed 20ノード付き）。  
+APIキーなしでも動作する（手動 seed 20ノード付き）。
 詳細は [rdl_bot/README.md](rdl_bot/README.md) を参照。
