@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 
+import dynamics
 from node_graph import Node, NodeGraph, _char_ngrams, _ngram_similarity
 
 
@@ -74,6 +75,24 @@ class TestSearch(GraphTestCase):
         self.assertEqual(kind, "miss")
         self.assertIsNone(nearest)
 
+    def test_unrelated_input_has_no_nearest(self):
+        """
+        回帰テスト: max_similarity を -1.0 から始めていたため、どのパターンとも
+        文字が重ならない入力でも「最初に走査されたノード」が最近傍になり、
+        無関係なノードに miss の H_pre が積み上がっていた。
+        """
+        g = self.graph(Node(inputs=["ABCDEF"]), Node(inputs=["GHIJKL"]))
+        node, kind, nearest = g.search("ぬめり")
+        self.assertEqual(kind, "miss")
+        self.assertIsNone(nearest)
+
+    def test_slightly_similar_input_still_has_nearest(self):
+        n = Node(inputs=["今日は疲れた"])
+        g = self.graph(n)
+        _, kind, nearest = g.search("今日は眠い")
+        self.assertEqual(kind, "miss")
+        self.assertEqual(nearest.id, n.id)
+
     def test_partial_score_prefers_closer_length(self):
         """
         回帰テスト: 以前のスコアは len(pattern)/len(text) だったため、
@@ -100,8 +119,58 @@ class TestSearch(GraphTestCase):
         node, kind, _ = g.search("ありがとう")
         self.assertEqual(node.response, "learned")
 
+    def test_user_node_wins_over_bootstrap_seed(self):
+        """同梱seedもユーザー由来ノードに置換される（設計書 §3.7）。"""
+        seed = Node(inputs=["ありがとう"], response="seed", source="bootstrap_seed", confidence=0.5)
+        learned = Node(inputs=["ありがとう"], response="learned", source="llm_learned", confidence=0.9)
+        g = self.graph(seed, learned)
+        node, _, _ = g.search("ありがとう")
+        self.assertEqual(node.response, "learned")
+
 
 class TestStatusResolution(GraphTestCase):
+    def test_quarantined_node_does_not_shadow_an_active_one(self):
+        """
+        回帰テスト: 候補を最良1件だけ確定させていたため、同じ入力を持つ
+        高confidenceの quarantined ノードが、低confidenceでも active な
+        ノードを覆い隠して miss になっていた。
+        """
+        blocked = Node(inputs=["ありがとう"], response="隔離された応答", confidence=0.9)
+        blocked.status = "quarantined"
+        usable = Node(inputs=["ありがとう"], response="正常な応答", confidence=0.8)
+        g = self.graph(blocked, usable)
+        node, kind, _ = g.search("ありがとう")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(node.id, usable.id)
+
+    def test_quarantined_does_not_shadow_on_partial_match(self):
+        blocked = Node(inputs=["疲れた"], response="隔離", confidence=0.9)
+        blocked.status = "quarantined"
+        usable = Node(inputs=["疲れた"], response="正常", confidence=0.8)
+        g = self.graph(blocked, usable)
+        node, kind, _ = g.search("今日はとても疲れた")
+        self.assertEqual(kind, "partial")
+        self.assertEqual(node.id, usable.id)
+
+    def test_deprecated_shadowing_redirects_instead_of_missing(self):
+        successor = Node(inputs=["新"], response="後継")
+        old = Node(inputs=["ありがとう"], response="旧", confidence=0.9)
+        old.status = "deprecated"
+        old.relations.append(successor.id)
+        other = Node(inputs=["ありがとう"], response="別の正常ノード", confidence=0.5)
+        g = self.graph(old, successor, other)
+        node, kind, _ = g.search("ありがとう")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(node.id, successor.id)
+
+    def test_all_candidates_unusable_is_miss(self):
+        a = Node(inputs=["ありがとう"], confidence=0.9)
+        b = Node(inputs=["ありがとう"], confidence=0.8)
+        a.status = b.status = "quarantined"
+        g = self.graph(a, b)
+        _, kind, _ = g.search("ありがとう")
+        self.assertEqual(kind, "miss")
+
     def test_quarantined_node_is_treated_as_miss(self):
         n = Node(inputs=["だめな応答"], response="否定された")
         n.status = "quarantined"
@@ -185,6 +254,65 @@ class TestLifecycle(GraphTestCase):
         n.touch()
         self.assertEqual(n.ttl, 100)
 
+    def test_inertia_grows_with_confidence_usage_and_approval(self):
+        base = Node(inputs=["x"], confidence=0.5)
+        used = Node(inputs=["x"], confidence=0.5)
+        used.usage_count = 10
+        approved = Node(inputs=["x"], confidence=0.5)
+        approved.approval_count = 10
+        self.assertGreater(used.inertia(), base.inertia())
+        self.assertGreater(approved.inertia(), base.inertia())
+
+    def test_kappa_falls_as_inertia_grows(self):
+        """NN借用 §5: κ(M_B) = exp(-‖M_B‖/M_0)。慣性が強いほど更新しにくい。"""
+        soft = Node(inputs=["x"], confidence=0.2)
+        hard = Node(inputs=["x"], confidence=1.0)
+        hard.usage_count = 30
+        hard.approval_count = 20
+        self.assertGreater(soft.kappa(), hard.kappa())
+
+    def test_kappa_stays_in_unit_range(self):
+        for conf, usage, approval in ((0.0, 0, 0), (1.0, 0, 0), (1.0, 500, 500)):
+            n = Node(inputs=["x"], confidence=conf)
+            n.usage_count, n.approval_count = usage, approval
+            with self.subTest(conf=conf, usage=usage):
+                self.assertGreaterEqual(n.kappa(), 0.0)
+                self.assertLessEqual(n.kappa(), 1.0)
+
+    def test_absolutised_structure_loses_self_correction(self):
+        """‖M_B‖ → 大 で κ → 0（M_B 絶対性）。"""
+        n = Node(inputs=["x"], confidence=1.0)
+        n.usage_count = 200
+        self.assertLess(n.kappa(), 0.01)
+
+    def test_reinforce_approaches_the_ceiling_without_exceeding_it(self):
+        """
+        Core §6.1 の整合側 dM_B/dt。使われ続けるだけでは天井までしか
+        上がらない（1.0 到達は明示的な同意でのみ）。
+        """
+        n = Node(inputs=["x"], confidence=0.5)
+        for _ in range(500):
+            n.reinforce(0.04)
+        self.assertLessEqual(n.confidence, dynamics.CONFIG.alignment_ceiling)
+        self.assertAlmostEqual(n.confidence, dynamics.CONFIG.alignment_ceiling, places=3)
+
+    def test_reinforce_is_monotonic_and_small(self):
+        n = Node(inputs=["x"], confidence=0.5)
+        n.reinforce(0.04)
+        self.assertGreater(n.confidence, 0.5)
+        self.assertLess(n.confidence - 0.5, 0.05)
+
+    def test_reinforce_does_not_pull_high_confidence_down(self):
+        """承認で天井を超えたノードを、整合が引き下げないこと。"""
+        n = Node(inputs=["x"], confidence=1.0)
+        n.reinforce(0.04)
+        self.assertEqual(n.confidence, 1.0)
+
+    def test_zero_rate_is_a_no_op(self):
+        n = Node(inputs=["x"], confidence=0.5)
+        n.reinforce(0.0)
+        self.assertEqual(n.confidence, 0.5)
+
     def test_confidence_decays_only_after_ttl_expires(self):
         n = Node(inputs=["x"], ttl=1, confidence=1.0)
         n.decay_confidence()
@@ -242,6 +370,42 @@ class TestPersistence(GraphTestCase):
         g.save()
         with open(nested, encoding="utf-8") as f:
             self.assertEqual(len(json.load(f)), 1)
+
+
+class TestMBNormAndDissipation(GraphTestCase):
+    def test_m_b_norm_grows_with_the_graph(self):
+        g = self.graph(Node(inputs=["a"], confidence=0.5))
+        before = g.m_b_norm()
+        g.add(Node(inputs=["b"], confidence=0.5))
+        self.assertGreater(g.m_b_norm(), before)
+
+    def test_m_b_norm_of_empty_graph_is_zero(self):
+        self.assertEqual(self.graph().m_b_norm(), 0.0)
+
+    def test_m_b_norm_ignores_inactive_nodes(self):
+        active = Node(inputs=["a"], confidence=0.5)
+        dead = Node(inputs=["b"], confidence=0.5)
+        dead.status = "quarantined"
+        g = self.graph(active, dead)
+        self.assertAlmostEqual(g.m_b_norm(), self.graph(active).m_b_norm())
+
+    def test_strong_directions_dissipate_faster(self):
+        """
+        NN借用 §4: 「M_B の得意な方向ほど散逸が速い」＝
+        熱は苦手な（慣性の弱い）方向に残る。
+        """
+        weak = Node(inputs=["a"], confidence=0.2)
+        strong = Node(inputs=["b"], confidence=1.0)
+        strong.usage_count = 10
+        g = self.graph(weak, strong)
+        rates = g.dissipation_rates(gamma=0.01, cap=0.15)
+        self.assertGreater(rates[strong.id], rates[weak.id])
+
+    def test_dissipation_rate_is_capped(self):
+        n = Node(inputs=["a"], confidence=1.0)
+        n.usage_count = 1000
+        g = self.graph(n)
+        self.assertLessEqual(g.dissipation_rates(gamma=0.01, cap=0.15)[n.id], 0.15)
 
 
 class TestStats(GraphTestCase):

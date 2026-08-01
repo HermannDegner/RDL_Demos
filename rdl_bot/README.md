@@ -42,6 +42,7 @@ APIキー不要。LLM呼び出しは行わず、検索・H蓄積・leap分岐・
 | `/sfo` | 現在のAI_SFOプロファイルを表示 |
 | `/mbti <TYPE>` | MBTIタイプまたは `RDL_native_*` プリセットでSFOプロファイルを再初期化（例: `/mbti INTP`、`/mbti RDL_native_trickster`。大文字小文字は問わない） |
 | `/trust` | ドメイン（spatial_tag）別のLLM信用度と設定値を表示 |
+| `/dyn` | 動態係数（θ・ξ・κ・散逸）とその帰結を表示 |
 | `/xipool` | ξプールの内容を表示 |
 | `/graph` | グラフ統計（総ノード数・source別・phase別・status別） |
 | `/hot` | H値が高いノードTOP3 |
@@ -60,13 +61,15 @@ rdl_bot/
 ├── llm_bridge.py    LLMBridge（Anthropic API・ξポンプ）
 ├── sfo_profile.py   AI_SFO（空間流向診断プロファイル・MBTI変換・drift機構）
 ├── llm_trust.py     LLMTrust（ドメイン別LLM信用度モデル）
+├── dynamics.py      DynamicsConfig（動態係数の一元管理・外部設定）
 ├── requirements.txt
 ├── tests/           単体テスト（stdlibのunittestのみ・追加依存なし）
 └── data/
     ├── seed_v0.1.json         手動 Phase 0 ノード（20件・APIキー不要）
     ├── graph.json             実行時に生成・更新される学習グラフ
     ├── session_state.json     H_pre/H_post・SFO drift・ξプール・LLMモードの永続化
-    └── llm_trust_config.json  （任意）LLM信用度の初期変数を上書きする設定ファイル
+    ├── llm_trust_config.json  （任意）LLM信用度の初期変数を上書きする設定ファイル
+    └── dynamics_config.json   （任意）動態係数を上書きする設定ファイル
 ```
 
 ---
@@ -88,32 +91,105 @@ rdl_bot/
   放置するとそれが毎ターン `should_leap()` の最大値を占め続け、実在ノードのleapが永久に起きなくなる
   （例: LLM生応答を3回 `n` で否定すると `H_post["__llm__"]` が閾値を超え、以降の学習が止まる）
 
+### κ（自己修正可能性）と散逸
+
+借用実装層（`RDL_計算実装層_NN借用 v0.1` / `RDL_応用実装層_LangGraph_LangChain借用 v0.1`）から
+Node 再設計なしに適用できる分を入れてある。
+
+```
+‖M_B‖(node) = confidence × (1 + 0.3×usage_count + 0.5×approval_count)
+κ(node)     = exp(-‖M_B‖ / 5.0)
+a_k         = min(cap, γ × ‖M_B‖)          散逸行列 A の対角成分
+```
+
+- **κ が整合側の更新率を絞る** — `dM_B/dt = κ·η·E·F^T − λ·M_B + ξ` の κ に相当。
+  慣性が強くなるほど自分では動かなくなる（過学習防止であり、同時に M_B 絶対性の表現）
+- **κ→0 のノードで応答するときは警告を出す** — 「確信が固まっている時こそレビューが要る」を
+  構造から出す（LangGraph借用 §6 の κ ゲート。CLI では HITL の代わりにユーザーへ促す）
+- **H が毎ターン受動的に散逸する** — `dH_vec/dt` の `−A·H_vec` 項。慣性の強い（M_B の得意な）
+  方向ほど速く冷め、**弱い方向に熱が残る**。以前は完全ヒット・同意・leap という離散イベントで
+  しか H が下がらず、この指向性が生まれなかった
+- **関係保存則は逆算観測のみ** — `/h` が `‖M_B‖ · D[ξ] = 𝒦` を表示する。Core §4.2 のとおり
+  𝒦 は直接観測できないので積として逆算するだけで、制御には使わない
+
+### 動態係数は実際に動かして決める
+
+`γ`・`M_0`・`ξ飽和件数`・整合レートなどには **Core にも借用実装層にも決定則が無い**
+（NN借用 v0.1 の残課題「η・λ・α・β・γ・M_0 の具体的な決定則」がまさにこれ）。
+同梱の値は暫定で、運用の感触でしか決まらない。
+
+そのため係数はコードに散らさず `dynamics.py` の `DynamicsConfig` に集約してあり、
+`data/dynamics_config.json` を置けば**変えたいキーだけ**上書きできる。
+
+```json
+{ "dissipation_gamma": 0.05, "kappa_m0": 2.0 }
+```
+
+`/dyn` は係数そのものに加えて**その帰結**を表示する。`γ=0.01` だけ見ても調整できないので、
+半減期など解釈できる形に直してある。
+
+```
+θ: leap 19 回で上限 5.0 に到達（M_Δ相ごとに ×0.97 で初期値へ戻る）
+ξ: プール 10 件でξ圧1.0 → θ_eff は θ×[0.65, 0.85] に揺れる
+κ: ‖M_B‖>3.8 で自力修正不能とみなす（例: confidence 1.0 なら使用 13 回相当）
+散逸（H が半減するまでのターン数）:
+  同梱seed   ‖M_B‖= 0.50  a_k=0.025  半減期=28ターン
+  定着中     ‖M_B‖= 3.60  a_k=0.150  半減期=5ターン
+現状: activeノード20件  κ中央値=0.779  自力修正不能=0件
+```
+
+調整の目安：
+
+| 症状 | 触る係数 |
+|---|---|
+| 熱が冷めすぎて leap が起きない | `dissipation_gamma` を下げる |
+| 些細な否定で leap しすぎる | `dissipation_gamma` を上げる / `theta_initial` を上げる |
+| すぐ「自力修正不能」になる | `kappa_m0` を上げる / `inertia_usage_weight` を下げる |
+| いつまでも確信が固まらない | `align_rate_exact` を上げる / `alignment_ceiling` を上げる |
+| ξ が溜まっても再編が起きない | `xi_drop_ratio` を上げる / `xi_saturation` を下げる |
+
 ### ノードライフサイクル
 
 ```
-source: manual / llm_seed / llm_learned / graph_composed
+source: bootstrap_seed / llm_seed / llm_learned / graph_composed / manual
 phase:  M_lat（候補）→ activation_count≥3 で M_act（安定）
 status: active → quarantined（LLM off時に否定が閾値超過）
               → deprecated（LLM on時、修正ノードに置き換わった）
 ```
 
-- `manual` ノードは実使用（`touch()`）のたびにTTLが回復し、使われ続ける限り経過ターン数だけでは死滅しない
-- `llm_seed` ノードは TTL<=0 かつ低confidenceで `retire_dead_nodes()` により削除（50ターンごと）
+- 同梱の `seed_v0.1.json` は `bootstrap_seed` / confidence 0.5 で読み込まれる。設計書 §3.7 が定めるとおり
+  「仮置きの足場」であり、内部経験の重みは `llm_seed` と同じ 0.1。ユーザー承認（`approval_count`）が
+  積み重なって初めて内部経験へ変換される
+- 実使用（`touch()`）のたびにTTLが回復し、使われ続ける限り経過ターン数だけでは死滅しない
+- seed ノード（`bootstrap_seed` / `llm_seed`）は TTL<=0 かつ低confidenceで `retire_dead_nodes()` により削除（50ターンごと）
 - 毎ターン `decay_confidence()` が全ノードに走る（TTLが尽きた未使用ノードのみ実質的に減衰する）
 - `quarantined` / `deprecated` ノードは `search()` / `compose_from_graph()` の応答候補から除外される。`deprecated` ノードは `relations` 経由で後継ノードへ透過的にリダイレクトされる
 
-### leap フロー（既存ノードの修正 と 新規学習の両方をカバー）
+### leap フロー — Hの発生位置と作用先を分離する
+
+`should_leap()` が返すのは「グラフ全体で最もHが高いノード」であって、
+「今回の入力に関係するノード」ではない。この2つを混同すると、今回とは
+無関係な過去のノードの修正版が今回の返答になってしまう。そこで leap を
+`LeapDecision`（target / **scope** / cause / trigger_event_seq / trigger_input）
+として明示化し、scope で扱いを分けている。
 
 ```
-should_leap() = True（hot_nid = 最もHが高いノード）
-  ├── hot_nidが既存ノードに対応する
-  │     ├── LLM:on  → ask_for_node_revision() → 修正版ノードを新規作成し
-  │     │             旧ノードをdeprecated化、relationsで接続
-  │     └── LLM:off → 旧ノードをquarantine化（応答には使わない）
-  └── hot_nidが実ノードに対応しない（miss由来の新規パターン）
-        ├── LLM:on  → ask_for_node() → Node(source=llm_learned, phase=M_lat)
-        └── LLM:off → compose_from_graph()（近傍ノードのresponseを借用）
+should_leap() = True
+  ├── current    今回一致したノード自身が熱い
+  │                LLM:on  → ask_for_node_revision(hot_node, 現在入力)
+  │                          → 修正版を作り旧ノードをdeprecated化、応答に使う
+  │                LLM:off → 旧ノードをquarantine化（応答には使わない）
+  ├── background 今回とは無関係なノードが熱い
+  │                同上の修正を裏で行うが、**今回の応答としては返さない**。
+  │                修正プロンプトにも現在入力を渡さない（内容が汚染されるため）
+  ├── unresolved 未解決入力(PENDING_MISS_ID)の蓄積が閾値超過
+  │                今回がmissなら ask_for_node() で新規学習して消化。
+  │                LLMの成否や今回の一致有無によらず必ず減衰させる
+  └── phantom    実体の無いID（__llm__ / __crisis__、退場済みノード）→ 破棄
 ```
+
+`current` 以外では `trigger_input` が None になり、`ask_for_node_revision()`
+はプロンプトから現在入力の行ごと落とす。
 
 否定(`n`)・言い換え(`?`)の単発フィードバックは、応答内容そのものは書き換えず
 `confidence` の減衰とノードへの反例記録（`counterexamples`）に留める。
@@ -134,7 +210,7 @@ internal_experience = Σ(そのドメインのactiveノードについて
 ```
 
 `experience_weight(node)` は、ノードの出自(`source`)に応じた基礎重み
-（`llm_seed`=0.1 …「教わっただけ」/ `manual`=0.8 など）から始まり、
+（`bootstrap_seed`/`llm_seed`=0.1 …「教わっただけ」/ `manual`=0.8 など）から始まり、
 ユーザー承認（`approval_count`）が積み重なるほど1.0（自分で検証済み）に
 近づく。これにより、LLMから教わっただけの知識を大量に持っていても
 「経験豊富だからLLMを信用しなくなる」という誤判定を避けている。
@@ -142,6 +218,10 @@ internal_experience = Σ(そのドメインのactiveノードについて
 quarantined/deprecatedノードは「否定され続けている経験」なので
 internal_experienceには数えない。ドメインごとに独立して計算されるため、
 概念空間は成熟していても身体空間はまだ幼い、といった非一様な成熟が起こる。
+
+起動直後（seed 20件のみ）の信用度はおよそ 人0.43 / 概念0.46 / 身体0.55 /
+物語0.95 / 制度0.95 で、外部LLMを足場として使える範囲にある。そのドメインの
+ノードがユーザーに承認・使用されると 0.05 付近まで下がり、自力解決へ移る。
 
 信用度は「miss時の早期相談」だけでなく、部分一致した内部応答の
 confidenceがそのドメインの信用度を下回る場合にも、確率的にLLMへの
@@ -176,7 +256,16 @@ LLMは素のJSON・コードフェンス付き・散文の前置き付きのい�
 ### 既知の制限（Phase 1）
 
 - exact/partial一致自体は依然として部分文字列マッチ（表記ゆれ・同義語には弱い）
-- miss時の最近傍探索は文字N-gram（分かち書き不要）に変更済みだが、埋め込みベースの意味的類似度ではない
+- miss時の最近傍探索は文字N-gram（分かち書き不要）に変更済みだが、埋め込みベースの意味的類似度ではない。
+  類似度が `MIN_NEAREST_SIMILARITY`(0.05) 未満なら最近傍なしとし、そのmissのHは
+  `HState.PENDING_MISS_ID` へ積む（無関係なノードにHを積むと、そのノードが誤って修正・隔離される）
+- **Node が「観測・概念・関係・応答」を1つに混在させている。** `inputs`/`rdl_type`/`response` は
+  発話に対する応答テンプレートであって、ユーザーのM_B構造そのものではない。時間変化・条件・
+  内的葛藤・過去判断との反転関係などは保持できない
+- **`relations` が型なしのID列で、2つの用途に多重化されている**（意味的なW_ij と
+  deprecated→後継の履歴リンク）。`_resolve_active()` は `relations[-1]` を後継とみなすため、
+  後から意味エッジを足すと後継解決が壊れる。型付きEdge（`successor_of` / `semantically_related_to` 等）
+  への分離が必要
 - グラフ内合成（LLM:off 時）は近傍借用のみ。W_ij による本格合成は Phase 4
 - SFO・MBTI初期値・ξ pool・簡易M_Δ代謝は実装済み（`sfo_profile.py`）。SFOがノード選択自体に影響する仕組み、LLMへのノードグラフ文脈注入、W_ijの本格的な張り直しは未着手
 - `NodeGraph.merge_or_split_nodes()` は空実装、`update_relations()` も片方向にIDを足すだけ（Phase D）

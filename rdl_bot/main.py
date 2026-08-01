@@ -12,6 +12,7 @@ RDL個人M_B外部化AI - CLI ループ (Phase 0 + Phase A/B)
   /sfo                        AI_SFOプロファイルを表示
   /mbti <TYPE>                MBTIタイプでSFOプロファイルを再初期化
   /trust                      ドメイン別LLM信用度を表示
+  /dyn                        動態係数とその帰結を表示
   /xipool                     ξプールを表示
   /graph                      グラフ統計を表示
   /hot                        H高いノードを表示
@@ -21,6 +22,7 @@ RDL個人M_B外部化AI - CLI ループ (Phase 0 + Phase A/B)
 
 import sys
 import os
+import math
 import random
 
 # Windows での文字化け防止
@@ -32,10 +34,13 @@ if sys.platform == "win32":
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 import json
+from dataclasses import dataclass
 from typing import Optional
 
-from node_graph import NodeGraph, Node
-from h_state import HState
+import dynamics
+from dynamics import load_dynamics_config
+from node_graph import NodeGraph, Node, SEED_SOURCES
+from h_state import HState, xi_pressure
 from llm_bridge import LLMBridge
 from sfo_profile import AI_SFO, DEFAULT_SFO_PRESET, create_sfo_profile_from_mbti
 from llm_trust import LLMTrust, LLMTrustConfig
@@ -46,12 +51,13 @@ BANNER = """
   sumitsuku-AI  /  RDL Bot  v0.1
   Phase 0->A/B  CLI prototype
 ========================================
-  /llm on|off|once  /h  /sfo  /mbti  /trust  /xipool  /graph  /hot  /quit
+  /llm on|off|once  /h  /sfo  /mbti  /trust  /dyn  /xipool  /graph  /hot  /quit
   feedback: y(agree) n(deny) ?(rephrase)
 """
 
 SESSION_STATE_PATH = "data/session_state.json"
 LLM_TRUST_CONFIG_PATH = "data/llm_trust_config.json"
+DYNAMICS_CONFIG_PATH = "data/dynamics_config.json"
 DOMAIN_TAGS = ["人", "概念", "物語", "制度", "身体"]
 
 
@@ -113,6 +119,61 @@ def feedback_prompt(last_node_id: str, last_input: str, graph: NodeGraph, h: HSt
     apply_feedback(fb, last_node_id, last_input, graph, h)
 
 
+def print_dynamics(graph: NodeGraph) -> None:
+    """
+    動態係数と、その帰結を表示する。
+
+    これらの係数は Core にも借用実装層にも決定則が無く、実際に動かした
+    感触でしか決まらない（NN借用 v0.1 の残課題そのもの）。
+    「γ=0.01」だけ見ても調整できないので、半減期のような
+    解釈できる形に直して並べる。
+    """
+    cfg = dynamics.CONFIG
+    print(f"  動態係数（{DYNAMICS_CONFIG_PATH} で上書き可）:")
+    print(f"    {cfg.to_dict()}")
+
+    print("  帰結:")
+    # θ が上限に張り付くまでの leap 回数
+    if cfg.theta_raise_on_leap > 1.0 and cfg.theta_max > cfg.theta_initial:
+        n = math.ceil(math.log(cfg.theta_max / cfg.theta_initial)
+                      / math.log(cfg.theta_raise_on_leap))
+        print(f"    θ: leap {n} 回で上限 {cfg.theta_max} に到達"
+              f"（M_Δ相ごとに ×{cfg.theta_relax} で初期値へ戻る）")
+
+    # ξ圧が最大のときの θ_eff の範囲
+    lo = 1 - cfg.xi_drop_ratio - cfg.xi_jitter_ratio
+    hi = 1 - cfg.xi_drop_ratio + cfg.xi_jitter_ratio
+    print(f"    ξ: プール {cfg.xi_saturation:.0f} 件でξ圧1.0 → "
+          f"θ_eff は θ×[{lo:.2f}, {hi:.2f}] に揺れる")
+
+    # κゲートが発動する慣性
+    if 0 < cfg.kappa_hitl_threshold < 1:
+        m_b = -cfg.kappa_m0 * math.log(cfg.kappa_hitl_threshold)
+        print(f"    κ: ‖M_B‖>{m_b:.1f} で自力修正不能とみなす"
+              f"（例: confidence 1.0 なら使用 {m_b / max(cfg.inertia_usage_weight, 1e-9):.0f} 回相当）")
+
+    # 散逸の半減期
+    print("    散逸（H が半減するまでのターン数）:")
+    for label, conf, usage, appr in (
+        ("同梱seed  ", 0.5, 0, 0),
+        ("定着中    ", 0.9, 10, 0),
+        ("絶対化    ", 1.0, 30, 10),
+    ):
+        n = Node(inputs=["_"], confidence=conf)
+        n.usage_count, n.approval_count = usage, appr
+        rate = min(cfg.dissipation_cap, cfg.dissipation_gamma * n.inertia())
+        half = math.log(2) / rate if rate > 0 else float("inf")
+        print(f"      {label} ‖M_B‖={n.inertia():5.2f}  a_k={rate:.3f}  半減期={half:.0f}ターン")
+
+    # 実グラフの現状
+    if graph.nodes:
+        kappas = [n.kappa() for n in graph.nodes.values() if n.status == "active"]
+        if kappas:
+            frozen = sum(1 for k in kappas if k < cfg.kappa_hitl_threshold)
+            print(f"    現状: activeノード{len(kappas)}件  κ中央値="
+                  f"{sorted(kappas)[len(kappas) // 2]:.3f}  自力修正不能={frozen}件")
+
+
 def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_profile: AI_SFO, xi_pool: list[str], llm_trust: LLMTrust) -> bool:
     """コマンド処理。Trueなら次のループへ。"""
     parts = cmd.strip().split()
@@ -137,7 +198,13 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
                 print("  on / off / once を指定してください")
 
     elif name == "/h":
-        print(f"  {h.summary()}")
+        pressure = xi_pressure(xi_pool)
+        print(f"  {h.summary(pressure)}")
+        # 関係保存則 ‖M_B‖·D[ξ] = 𝒦 の逆算（Core §4.2）。
+        # 𝒦 は直接観測できないので積として逆算するだけで、制御には使わない。
+        m_b = graph.m_b_norm()
+        print(f"  ‖M_B‖={m_b:.2f}  D[ξ]≈{pressure:.2f}  𝒦≈{m_b * pressure:.2f}"
+              f"   （𝒦は逆算値。制御には使わない）")
 
     elif name == "/sfo":
         print(f"  AI_SFOプロファイル: {sfo_profile.to_dict()}")
@@ -163,6 +230,9 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
         for tag, trust in llm_trust.trust_by_domain(graph, DOMAIN_TAGS).items():
             exp = llm_trust.internal_experience(graph, tag)
             print(f"    {tag}: trust={trust:.2f}  internal_experience={exp:.2f}")
+
+    elif name == "/dyn":
+        print_dynamics(graph)
 
     elif name == "/xipool":
         if not xi_pool:
@@ -200,12 +270,17 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
     """M_Δ相: 定期再編フェーズ (設計書 v0.3 §3.6)"""
     print("  [M_Δ相] 代謝フェーズ開始...")
 
+    # 0. 熱の散逸 dH_vec/dt の -A·H_vec 項（NN借用 v0.1 §4）。
+    # 慣性の強い（M_Bの得意な）方向ほど速く冷め、弱い方向に熱が残る。
+    h_state.dissipate(graph.dissipation_rates())
+
     # 1. 低confidence・低使用頻度ノードのTTL減算と削除
     for n in list(graph.nodes.values()):
         n.decay_confidence()
-        # llm_seed ノードの retirement 判定 (設計書 v0.3 §3.7 Seedの取り扱い原則)
-        # ユーザー由来ノードに置換されきった llm_seed は削除候補
-        if n.source == "llm_seed" and n.confidence < 0.3 and n.usage_count == 0:
+        # seed ノードの retirement 判定 (設計書 v0.3 §3.7 Seedの取り扱い原則)
+        # ユーザー由来ノードに置換されきった seed は削除候補。
+        # 同梱の bootstrap_seed も llm_seed と同じく仮置きの足場なので対象。
+        if n.source in SEED_SOURCES and n.confidence < 0.3 and n.usage_count == 0:
             n.ttl = 0 # 即時削除対象とする
 
     if retire:
@@ -290,19 +365,110 @@ def compose_from_graph(user_input: str, graph: NodeGraph) -> tuple[str, str]:
     return "[未知の入力です。/llm on で外部参照できます]", "__none__"
 
 
-def _correct_node(hot_node: Node, user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge) -> tuple[Optional[str], Optional[str]]:
+@dataclass
+class LeapDecision:
+    """
+    このターンに発火したleapの内容。
+    Hがどこに溜まったか（target）と、それが今回の入力に由来するか
+    （scope）を明示的に分けて持つ。以前はこの区別が無く、今回の入力とは
+    無関係なノードの修正版がそのまま今回の応答として返っていた。
+    """
+    target_node_id: str
+    scope: str          # "current" | "background" | "unresolved" | "phantom"
+    cause: str          # deny / rephrase / miss / silence / unknown
+    trigger_event_seq: int
+    # 修正プロンプトに渡してよい現在入力。scope="current" のときだけ入る。
+    trigger_input: Optional[str] = None
+
+
+
+def _reinforce_along_v_b(node: Node, h: HState, pressure: float, base_rate: float) -> None:
+    """
+    整合領域（H < θ_eff）における dM_B/dt を適用する（Core §6.1）。
+
+    更新量は二つの係数で絞る：
+      slack : θ_eff への近さ。H が 0 なら満額、θ_eff に近づくほど 0 に漸近し、
+              超えれば跳躍側（_correct_node）へ移る。これにより整合と跳躍が
+              「同じ量 H に対する連続な応答」になる（Core §6.3）
+      κ     : 自己修正可能性（NN借用 v0.1 §1 の dM_B/dt = κ·η·E·F^T ...）。
+              慣性が強くなるほど更新率が下がる＝過学習防止であり、
+              同時に「固まった構造は自分では動かない」という M_B 絶対性の表現
+
+    以前は整合側の dM_B/dt がそもそも存在せず（touch と usage_count だけ）、
+    H閾値を境に「何も起きない」から「全面再編」へ不連続に飛んでいた。
+    """
+    theta_eff = h.theta_eff(pressure)
+    if theta_eff <= 0:
+        return
+    slack = max(0.0, 1.0 - h.merged_h(node.id) / theta_eff)
+    node.reinforce(base_rate * slack * node.kappa())
+
+
+def _warn_if_self_correction_is_lost(node: Node) -> None:
+    """
+    κ→0 の領域（LangGraph借用 v0.1 §6 の κ ゲート）。
+
+    慣性が固まりすぎて自力では修正できないノードで応答している場合、
+    自動更新に任せず、ユーザーの判断を仰ぐべき箇所であることを示す。
+    「確信が固まっている時こそレビューが要る」を構造から出す。
+    """
+    kappa = node.kappa()
+    if kappa < dynamics.CONFIG.kappa_hitl_threshold:
+        print(f"  [κ={kappa:.3f} — この応答は慣性が固まっており自力で修正できません。"
+              f"誤っていれば n で否定してください]")
+
+
+def _decide_leap(h: HState, graph: NodeGraph, match_type: str, node: Optional[Node],
+                 user_input: str, pressure: float = 0.0) -> Optional[LeapDecision]:
+    """
+    H閾値を超えたノードを特定し、それが今回の入力とどう関係するかを判定する。
+
+    scope:
+      current    今回一致したノード自身が熱い → 修正して今回の応答に使う
+      background 今回とは無関係なノードが熱い → 裏で修正するが応答には使わない
+      unresolved 未解決入力の蓄積が閾値超過 → 今回がmissなら新規学習で消化
+      phantom    実体の無いID（__llm__ など、退場済みノード）→ 破棄
+    """
+    leap_needed, hot_nid = h.should_leap(pressure)
+    if not leap_needed:
+        return None
+
+    common = {
+        "target_node_id": hot_nid,
+        "cause": h.dominant_cause(hot_nid),
+        "trigger_event_seq": h.last_event_seq(hot_nid),
+    }
+
+    if hot_nid == HState.PENDING_MISS_ID:
+        return LeapDecision(scope="unresolved", **common)
+
+    hot_node = graph.get_by_id(hot_nid)
+    if hot_node is None:
+        return LeapDecision(scope="phantom", **common)
+
+    if match_type in ("exact", "partial") and node is not None and node.id == hot_node.id:
+        return LeapDecision(scope="current", trigger_input=user_input, **common)
+
+    return LeapDecision(scope="background", **common)
+
+
+def _correct_node(hot_node: Node, decision: LeapDecision, graph: NodeGraph, h: HState, llm: LLMBridge) -> tuple[Optional[str], Optional[str]]:
     """
     否定・言い換えのHが閾値を超えて蓄積した既存ノード(hot_node)を修正する。
     LLM on: LLMに既存の誤答・否定履歴を渡して代替ノードを生成し、
             hot_nodeはdeprecated化してrelationsで新ノードにつなぐ。
     LLM off: 代替を生成できないので、hot_nodeをquarantine化するだけに留める
              （このノードはsearch()/compose_from_graph()の対象から外れる）。
+
+    現在入力は decision.trigger_input 経由でのみ渡す。背景ノードの修正に
+    今回の無関係な入力を混ぜると、修正内容そのものが汚染される。
     """
-    print(f"  [H閾値超過 → 既存ノードを再評価: {hot_node.rdl_type}]")
+    label = "既存ノードを再評価" if decision.scope == "current" else "背景ノードを再評価"
+    print(f"  [H閾値超過 → {label}: {hot_node.rdl_type} (cause={decision.cause})]")
 
     if llm.mode in ("on", "on-once") and llm.available():
         h.on_llm_call()
-        revised = llm.ask_for_node_revision(hot_node, user_input)
+        revised = llm.ask_for_node_revision(hot_node, decision.trigger_input)
         h.leap_done(hot_node.id)
         if revised:
             revised.relations.append(hot_node.id)
@@ -323,6 +489,33 @@ def _correct_node(hot_node: Node, user_input: str, graph: NodeGraph, h: HState, 
         h.leap_done(hot_node.id)
         print("  [LLM off — 修正できないためノードを隔離しました]")
         return None, None
+
+
+def _learn_new_node(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge,
+                    xi_pool: list[str], reason: str) -> Optional[tuple[str, str]]:
+    """
+    未知入力をLLMでノード化する。成功なら (応答, ノードID)、
+    ノード化できなければξプールへ退避して生応答を返す。
+    どちらも駄目なら None（呼び出し側でグラフ内合成へ）。
+    """
+    if not (llm.mode in ("on", "on-once") and llm.available()):
+        return None
+
+    h.on_llm_call()
+    new_node = llm.ask_for_node(user_input)
+    if new_node:
+        graph.add(new_node)
+        graph.save()
+        return new_node.response or f"[新規学習({reason}): {new_node.rdl_type}]", new_node.id
+
+    # ノード化できなかった入力はξプールへ（後のM_Δ相で再評価される）
+    xi_pool.append(user_input)
+    print("  [LLMノード化失敗 → ξプールに格納しました]")
+    h.on_llm_call()
+    raw = llm.ask(user_input)
+    if raw:
+        return raw, "__llm__"
+    return None
 
 
 def _infer_domain(graph: NodeGraph, user_input: str, nearest: Optional[Node]) -> str:
@@ -358,14 +551,19 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
     """
     node, match_type, nearest = graph.search(user_input)
 
+    # ξ圧は跳躍境界を揺らし(θ_eff)、整合側の更新量にも効く。1ターン1回だけ評価する。
+    pressure = xi_pressure(xi_pool)
+
     if match_type == "exact":
         h.on_exact(node.id)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
+        _reinforce_along_v_b(node, h, pressure, dynamics.CONFIG.align_rate_exact)
     elif match_type == "partial":
         h.on_partial(node.id)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
+        _reinforce_along_v_b(node, h, pressure, dynamics.CONFIG.align_rate_partial)
 
         # 内部応答とLLM信用度の裁定：低confidenceの部分一致は、
         # そのドメインの信用度が上回っているならLLMに譲ったほうがよい
@@ -385,98 +583,75 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
                     return resp, new_node.id
                 # LLM失敗時は通常の部分一致応答へフォールスルー
     else:
-        # ミス：最近傍ノードIDをコンテキストとして渡す
-        context_nid = nearest.id if nearest else "__none__"
+        # ミス：十分に似たノードが無ければ PENDING_MISS_ID 側へ積む。
+        # 無関係なノードに積むと、そのノードが後で誤って修正・隔離される。
+        context_nid = nearest.id if nearest else None
         h.on_miss(context_nid)
 
-    leap_needed, hot_nid = h.should_leap()
+    # --- 構造の再編成(leap)は、今回の応答生成とは独立に処理する ---
+    # Hが溜まっている場所（target）と、今回の入力（trigger）は別物なので、
+    # 背景ノードの修正結果を今回の応答として返さない。
+    decision = _decide_leap(h, graph, match_type, node, user_input, pressure)
+    leap_response: Optional[tuple[str, str]] = None
 
-    if leap_needed:
-        hot_node = graph.get_by_id(hot_nid)
+    if decision is not None:
+        if decision.scope == "phantom":
+            # 実体の無いID（__llm__ / __crisis__、M_Δ相で退場したノード）に
+            # Hが溜まった状態。修正対象が無いのでleapで消化できず、放置すると
+            # 毎ターン should_leap() の最大値を占め続けて実ノードのleapを妨げる。
+            h.forget(decision.target_node_id)
 
-        if hot_node is not None:
-            # H閾値を超えたノードが実在する → 学習対象と修正対象を一致させる
-            correction_resp, correction_id = _correct_node(hot_node, user_input, graph, h, llm)
-            graph.save()
-
-            if match_type in ("exact", "partial") and node.id == hot_node.id and correction_resp is not None:
-                return correction_resp, correction_id
-            if match_type == "miss" and correction_resp is not None:
-                return correction_resp, correction_id
-            # ここに来るのは、
-            #  (a) hot_nodeが今回の一致ノードと同じだが修正に失敗し隔離のみだった場合
-            #  (b) hot_nodeが今回の入力とは別ノードで、背景で修正だけ適用した場合
-            # (a)は下のexact/partial応答チェックでstatus判定により弾かれ、
-            #     結局フォールバックへ進む。(b)は今回の入力に通常通り応答する。
-
-        elif match_type == "miss" and llm.mode in ("on", "on-once"):
-            print("  [H閾値超過 → LLMに問い合わせ中...]")
-            h.on_llm_call() # LLM呼び出しを記録
-            new_node = llm.ask_for_node(user_input)
-            if new_node:
-                graph.add(new_node)
-                graph.save()
-                h.leap_done(hot_nid)
-                h.resolve_miss(context_nid)
-                resp = new_node.response or f"[新規学習: {new_node.rdl_type}]"
-                return resp, new_node.id
-            else:
-                # LLM失敗 → ξプールに格納し、テキスト応答にフォールバック
-                xi_pool.append(user_input) # LLMがノード化できなかった入力をξプールへ
-                print("  [LLMノード化失敗 → ξプールに格納しました]")
-                h.on_llm_call() # LLM呼び出しを記録
-                raw = llm.ask(user_input)
-                if raw:
-                    return raw, "__llm__"
-                else:
-                    return "[LLM応答も失敗しました。ξプールに格納済み]", "__none__"
+        elif decision.scope == "unresolved":
+            # 未解決入力の蓄積が閾値超過。今回もmissなら新規学習で消化する。
+            if match_type == "miss":
+                print(f"  [未解決入力のH閾値超過 (θ={h.theta:.2f})]")
+                learned = _learn_new_node(user_input, graph, h, llm, xi_pool, reason="未解決H")
+                if learned is not None:
+                    h.resolve_miss(context_nid)
+                    leap_response = learned
+            # LLMの成否や今回の一致有無によらず、必ず減衰させる。
+            # ここで減衰させないと、この蓄積が毎ターン should_leap() の
+            # 最大値を占め続け、実ノードのleapを永久に妨げてしまう
+            # （疑似IDで起きていたのと同じ停止）。
+            h.leap_done(decision.target_node_id)
 
         else:
-            # hot_nid に対応する実ノードが存在しない。M_Δ相で退場した
-            # ノードか、__llm__ / __crisis__ / __none__ のような疑似IDに
-            # Hが溜まった状態（例：LLM生の応答を数回 n で否定すると
-            # H_post["__llm__"] が閾値を超える）。修正対象が無いので
-            # leapで消化できず、放置すると毎ターン should_leap() の
-            # 最大値を占め続けて実在ノードのleapを永久に妨げる。
-            h.forget(hot_nid)
-            if match_type == "miss":
-                print(f"  [H閾値超過 (θ={h.theta:.2f}) — グラフ内合成を試みます]")
+            hot_node = graph.get_by_id(decision.target_node_id)
+            correction_resp, correction_id = _correct_node(hot_node, decision, graph, h, llm)
+            graph.save()
+            # 応答として使えるのは、今回の入力自身が熱かった場合のみ。
+            # background の修正版は今回の入力への答えではない。
+            if decision.scope == "current" and correction_resp is not None:
+                leap_response = (correction_resp, correction_id)
 
-    elif match_type == "miss" and llm.mode in ("on", "on-once") and llm.available():
-        # H閾値には未達だが、このドメインはまだ内部経験が薄いかもしれない。
-        # 信用度が高いほど、閾値を待たずに確率的にLLMへ相談する
-        # （＝幼少期は外部LLMを養育者・外部足場として使う）。
+    if leap_response is not None:
+        return leap_response
+
+    # --- ここから先は「今回の入力への応答」 ---
+
+    if match_type == "miss" and llm.mode in ("on", "on-once") and llm.available():
+        # このドメインはまだ内部経験が薄いかもしれない。信用度が高いほど
+        # 確率的にLLMへ相談する（＝幼少期は外部LLMを養育者・外部足場として使う）。
         # ドメインは単一の最近傍ではなく上位k件の投票で推定する。
         domain = _infer_domain(graph, user_input, nearest)
         trust = llm_trust.trust_for(graph, domain)
         if random.random() < trust:
-            print(f"  [ドメイン『{domain}』は内部経験が薄い (信用度={trust:.2f}) → H閾値を待たずLLMへ相談]")
-            h.on_llm_call()
-            new_node = llm.ask_for_node(user_input)
-            if new_node:
-                graph.add(new_node)
-                graph.save()
-                # このmissは解決されたので、たまたま近くにいた既存ノードに
-                # 積み上がったH_preを軽減する（無関係なノードが後で誤って
-                # 修正対象に選ばれるのを防ぐ）。
+            print(f"  [ドメイン『{domain}』は内部経験が薄い (信用度={trust:.2f}) → LLMへ相談]")
+            learned = _learn_new_node(user_input, graph, h, llm, xi_pool, reason="早期相談")
+            if learned is not None:
+                # このmissは解決されたので、対応するH_preを軽減する。
                 h.resolve_miss(context_nid)
-                resp = new_node.response or f"[新規学習(早期相談): {new_node.rdl_type}]"
-                return resp, new_node.id
-            else:
-                xi_pool.append(user_input)
-                print("  [LLMノード化失敗 → ξプールに格納しました]")
-                h.on_llm_call()
-                raw = llm.ask(user_input)
-                if raw:
-                    return raw, "__llm__"
+                return learned
 
     if match_type == "exact" and node.status not in ("quarantined", "deprecated"):
         graph.save()
+        _warn_if_self_correction_is_lost(node)
         resp = node.response or f"[{node.rdl_type}] {user_input}"
         return resp, node.id
 
     if match_type == "partial" and node.status not in ("quarantined", "deprecated"):
         graph.save()
+        _warn_if_self_correction_is_lost(node)
         resp = node.response or f"[{node.rdl_type}（部分一致）] {user_input}"
         return resp, node.id
 
@@ -493,7 +668,20 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
 
 
 def load_seed_json(graph: NodeGraph, path: str = "data/seed_v0.1.json") -> int:
-    """グラフが空のとき手動 seed JSON を読み込む。追加数を返す。"""
+    """
+    グラフが空のとき同梱の普遍 seed JSON を読み込む。追加数を返す。
+
+    以前は source="manual" / confidence=0.9 で入れていた。設計書 §3.7 は
+    seedを「仮置きの足場であり、ユーザー由来ノードに置換される」ものと
+    定めているが、manual は内部経験の重みが最大(0.8)なので、seedを
+    読み込んだだけで人=0.07 / 概念=0.08 / 身体=0.11 と、起動直後から
+    外部LLMをほぼ信用しないAIになっていた（設計書 Phase A の
+    「LLM 70% / グラフ30%」とは逆）。
+
+    出自を bootstrap_seed に分け、内部経験の重みを llm_seed 並みに
+    抑えることで、ユーザーとの相互作用（approval_count）で初めて
+    内部経験へ変換されるようにする。
+    """
     try:
         with open(path, encoding="utf-8") as f:
             items = json.load(f)
@@ -503,8 +691,8 @@ def load_seed_json(graph: NodeGraph, path: str = "data/seed_v0.1.json") -> int:
                 rdl_type=d.get("rdl_type", "未分類"),
                 spatial_tag=d.get("spatial_tag", "概念"),
                 response=d.get("response"),
-                source="manual",
-                confidence=0.9,
+                source="bootstrap_seed",
+                confidence=0.5,
             ))
         graph.save()
         return len(items)
@@ -590,6 +778,7 @@ def main():
         llm.set_mode(saved_llm_mode if saved_llm_mode in ("on", "off", "on-once") else "on")
 
     llm_trust = LLMTrust(load_llm_trust_config(LLM_TRUST_CONFIG_PATH))
+    dynamics.configure(load_dynamics_config(DYNAMICS_CONFIG_PATH))
 
     print(BANNER)
 

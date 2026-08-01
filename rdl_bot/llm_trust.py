@@ -25,10 +25,11 @@ from typing import Dict, Iterable, Optional
 
 
 DEFAULT_SOURCE_WEIGHTS = {
-    "llm_seed": 0.1,       # LLMに種まきされただけ。最も「教わっただけ」
-    "llm_learned": 0.3,    # leap時にLLMが生成。まだ検証は薄い
-    "graph_composed": 0.6, # 既存の内部知識同士の合成
-    "manual": 0.8,         # 手動seed。最初から内部知識として与えられたもの
+    "llm_seed": 0.1,        # LLMに種まきされただけ。最も「教わっただけ」
+    "bootstrap_seed": 0.1,  # 同梱の普遍seed。出自は違うが同じく仮置きの足場
+    "llm_learned": 0.3,     # leap時にLLMが生成。まだ検証は薄い
+    "graph_composed": 0.6,  # 既存の内部知識同士の合成
+    "manual": 0.8,          # ユーザー自身が与えた内部知識
 }
 
 

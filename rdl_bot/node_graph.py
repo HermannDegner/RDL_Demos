@@ -1,9 +1,21 @@
 import json
+import math
 import uuid
 import os
+import dynamics
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
+
+
+# 「教わっただけ／同梱されただけ」の仮置きノード。ユーザー由来ノードに
+# 置換され、使われないまま confidence が下がれば退場する。
+SEED_SOURCES = frozenset({"llm_seed", "bootstrap_seed"})
+
+# これ未満の類似度しか無いノードは「最近傍」とみなさない。
+# 未知入力のHを、たまたま登録順が早いだけの無関係なノードへ
+# 積み上げてしまうのを防ぐ。
+MIN_NEAREST_SIMILARITY = 0.05
 
 
 def _char_ngrams(text: str, n: int = 2) -> set:
@@ -70,6 +82,55 @@ class Node:
         })
         if len(self.counterexamples) > 50:
             self.counterexamples = self.counterexamples[-50:]
+
+    def inertia(self) -> float:
+        """
+        このノードが張る局所 M_B の慣性ノルム ‖M_B‖。
+
+        Core §1.4 の入れ子ネットワーク性から、各ノードを下位 M_B として扱う。
+        confidence（Λ相当）を基礎に、実際に使われ・承認された分だけ強くなる。
+        使用と承認は上限を持たないので ‖M_B‖ は発散しうるが、それは
+        「絶対化した構造」に対応する正しい挙動（κ → 0 になる）。
+        """
+        cfg = dynamics.CONFIG
+        return self.confidence * (
+            1.0
+            + cfg.inertia_usage_weight * self.usage_count
+            + cfg.inertia_approval_weight * self.approval_count
+        )
+
+    def kappa(self, m_0: Optional[float] = None) -> float:
+        """
+        自己修正可能性 κ(M_B) = exp(-‖M_B‖ / M_0)（NN借用 v0.1 §5）。
+
+        κ = 1  慣性が弱く、いくらでも更新できる
+        κ → 0 慣性が強すぎて自分では修正できない（M_B 絶対性）
+
+        κ→0 の領域は「間違っていても直せない」領域なので、
+        自動更新ではなくユーザーの判断を仰ぐべき箇所になる
+        （LangGraph借用 v0.1 §6 の κ ゲート）。
+        """
+        m_0 = dynamics.resolve(m_0, "kappa_m0")
+        if m_0 <= 0:
+            return 0.0
+        return math.exp(-self.inertia() / m_0)
+
+    def reinforce(self, rate: float, ceiling: Optional[float] = None):
+        """
+        Core §6.1 の整合側の微小更新（dM_B/dt が V_B に沿って動く分）。
+
+        このノードが実際に応答を担ったということは、M_B のその方向
+        （＝このノードが張る安定方向）が今回も通用したということ。
+        慣性の強さ Λ に相当する confidence を、天井へ向けて漸近的に上げる。
+
+        天井は 1.0 ではない。使われ続けるだけで最大確信に達してしまうと、
+        ユーザー承認(approval_count)による検証と区別がつかなくなる。
+        1.0 に到達できるのは明示的な同意(y)だけ。
+        """
+        ceiling = dynamics.resolve(ceiling, "alignment_ceiling")
+        if rate <= 0 or self.confidence >= ceiling:
+            return
+        self.confidence += rate * (ceiling - self.confidence)
 
     def decay_confidence(self):
         # 設計書 v0.3 の M_Δ相 にある「低confidence・低使用頻度ノードのTTL減算と削除」を反映
@@ -189,31 +250,59 @@ class NodeGraph:
             return None
         return current
 
+    def _prefer_user_node(self, candidate: Node, user_input: str, allow_substring: bool) -> Node:
+        """
+        候補がseed（教わっただけ／同梱されただけの足場）なら、同じ入力を持つ
+        ユーザー由来ノードがあればそちらを優先する。
+        """
+        if candidate.source not in SEED_SOURCES:
+            return candidate
+        text_lower = user_input.lower()
+        for node in self.nodes.values():
+            if node.id == candidate.id or node.source in SEED_SOURCES:
+                continue
+            patterns = [p.lower() for p in node.inputs]
+            hit = text_lower in patterns
+            if not hit and allow_substring:
+                hit = any(p in text_lower for p in patterns)
+            if hit and node.confidence > candidate.confidence:
+                return node
+        return candidate
+
     def search(self, user_input: str) -> Tuple[Optional[Node], str, Optional[Node]]:
         """
         ユーザー入力に最も一致するノードを検索する。
         返り値: (node, match_type, nearest_node)
         match_type: "exact", "partial", "miss"
+
+        候補は「最良の1件」ではなくスコア順のリストで持ち、上から順に
+        _resolve_active() を通して最初に有効だったものを返す。
+        以前は最良候補1件だけを確定させていたため、同じ入力を持つ
+        高confidenceの quarantined ノードが、低confidenceでも active な
+        ノードを覆い隠して miss になっていた（応答できるノードが
+        存在するのに使われない）。
+
+        nearest_node は類似度が MIN_NEAREST_SIMILARITY 未満なら None を返す。
+        以前は max_similarity を -1.0 から始めていたため、どのパターンとも
+        文字が重ならない入力でも「最初に走査されたノード」が最近傍に
+        なってしまい、無関係なノードに miss の H_pre が積み上がっていた。
         """
         text_lower = user_input.lower()
-        best_exact_node = None
-        best_partial_node = None
-        best_exact_score = 0.0
-        best_partial_score = 0.0
+        exact_candidates: List[Tuple[float, Node]] = []
+        partial_candidates: List[Tuple[float, Node]] = []
 
-        # nearest_node は HState の on_miss で使われるため、常に返す
         nearest_node = None
-        max_similarity = -1.0
+        max_similarity = 0.0
         text_grams = _char_ngrams(text_lower)
 
         for node in self.nodes.values():
+            best_exact = None
+            best_partial = 0.0
             for pattern in node.inputs:
                 pattern_lower = pattern.lower()
                 # 完全一致に近いものを優先
                 if text_lower == pattern_lower:
-                    if node.confidence > best_exact_score:
-                        best_exact_score = node.confidence
-                        best_exact_node = node
+                    best_exact = node.confidence
                 # 部分一致
                 elif pattern_lower in text_lower or text_lower in pattern_lower:
                     # 部分一致のスコア = 短い方/長い方 * confidence。
@@ -222,9 +311,7 @@ class NodeGraph:
                     shorter = min(len(pattern_lower), len(text_lower))
                     longer = max(len(pattern_lower), len(text_lower), 1)
                     score = (shorter / longer) * node.confidence
-                    if score > best_partial_score:
-                        best_partial_score = score
-                        best_partial_node = node
+                    best_partial = max(best_partial, score)
 
                 # 最近傍ノードの特定：文字N-gramのJaccard類似度で測る
                 # （空白split()は日本語では機能しないため）
@@ -233,35 +320,24 @@ class NodeGraph:
                     max_similarity = similarity
                     nearest_node = node
 
-        # llm_seed の置換ロジックを考慮
-        # ユーザー由来のノード（manual, llm_learned, graph_composed）を優先
-        if best_exact_node:
-            candidate = best_exact_node
-            if candidate.source == "llm_seed":
-                for node in self.nodes.values():
-                    if (node.id != candidate.id and node.source != "llm_seed"
-                            and user_input.lower() in [p.lower() for p in node.inputs]
-                            and node.confidence > candidate.confidence):
-                        candidate = node
-                        break
-            resolved = self._resolve_active(candidate)
-            if resolved is not None:
-                return resolved, "exact", resolved
+            if best_exact is not None:
+                exact_candidates.append((best_exact, node))
+            elif best_partial > 0:
+                partial_candidates.append((best_partial, node))
 
-        if best_partial_node:
-            candidate = best_partial_node
-            if candidate.source == "llm_seed":
-                for node in self.nodes.values():
-                    if (node.id != candidate.id and node.source != "llm_seed"
-                            and (user_input.lower() in [p.lower() for p in node.inputs]
-                                 or any(p.lower() in user_input.lower() for p in node.inputs))
-                            and node.confidence > candidate.confidence):
-                        candidate = node
-                        break
-            resolved = self._resolve_active(candidate)
-            if resolved is not None:
-                return resolved, "partial", resolved
+        for candidates, match_type, allow_substring in (
+            (exact_candidates, "exact", False),
+            (partial_candidates, "partial", True),
+        ):
+            candidates.sort(key=lambda pair: pair[0], reverse=True)
+            for _, candidate in candidates:
+                candidate = self._prefer_user_node(candidate, user_input, allow_substring)
+                resolved = self._resolve_active(candidate)
+                if resolved is not None:
+                    return resolved, match_type, resolved
 
+        if max_similarity < MIN_NEAREST_SIMILARITY:
+            nearest_node = None
         return None, "miss", nearest_node
 
     def top_k_similar(self, user_input: str, k: int = 3) -> List[Tuple[Node, float]]:
@@ -284,6 +360,31 @@ class NodeGraph:
                 scored.append((node, best_sim))
         scored.sort(key=lambda pair: pair[1], reverse=True)
         return scored[:k]
+
+    def m_b_norm(self) -> float:
+        """
+        グラフ全体の整合慣性ノルム ‖M_B‖。
+        アクティブなノードの局所慣性を L2 ノルムで集約する。
+        関係保存則 ‖M_B‖·D[ξ] = 𝒦 の逆算（Core §4.2）に使う。
+        """
+        squares = sum(n.inertia() ** 2 for n in self.nodes.values() if n.status == "active")
+        return math.sqrt(squares)
+
+    def dissipation_rates(self, gamma: Optional[float] = None,
+                          cap: Optional[float] = None) -> Dict[str, float]:
+        """
+        散逸行列 A の対角成分 a_k = γ·λ_k（NN借用 v0.1 §4）。
+
+        「M_B の得意な方向ほど散逸が速い」＝ 慣性の強いノードほど熱を
+        速く逃がし、弱いノードには熱が残る。固有分解を持たないため、
+        固有値 λ_k の代理として各ノードの局所慣性を使う。
+        """
+        gamma = dynamics.resolve(gamma, "dissipation_gamma")
+        cap = dynamics.resolve(cap, "dissipation_cap")
+        return {
+            nid: min(cap, gamma * node.inertia())
+            for nid, node in self.nodes.items()
+        }
 
     def stats(self) -> Dict[str, int]:
         total = len(self.nodes)

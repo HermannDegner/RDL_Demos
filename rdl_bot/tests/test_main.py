@@ -1,6 +1,7 @@
 """応答ループ・leapフロー・代謝（main.py）"""
 
 import os
+import random
 import tempfile
 import unittest
 from unittest import mock
@@ -39,6 +40,167 @@ class RespondTestCase(unittest.TestCase):
 
     def respond(self, text, graph, h):
         return main.respond(text, graph, h, self.llm, self.sfo, self.xi, self.trust)
+
+
+class StubLLM(LLMBridge):
+    """
+    LLM:on を模したスタブ。API を呼ばずに、修正・学習の呼び出し内容を記録する。
+    """
+
+    def __init__(self, sfo):
+        super().__init__(sfo)
+        self.mode = "on"
+        self.revision_calls = []   # (hot_node, user_input)
+        self.learned_inputs = []
+        self.node_failure = False
+
+    def available(self):
+        return True
+
+    def ask_for_node_revision(self, hot_node, user_input=None):
+        self.revision_calls.append((hot_node, user_input))
+        return Node(inputs=list(hot_node.inputs), rdl_type="修正",
+                    response=f"[{hot_node.inputs[0]}の修正版]", source="llm_learned")
+
+    def ask_for_node(self, user_input):
+        self.learned_inputs.append(user_input)
+        if self.node_failure:
+            return None
+        return Node(inputs=[user_input], rdl_type="新規",
+                    response=f"[{user_input}を学習]", source="llm_learned")
+
+    def ask(self, user_input, context=""):
+        return f"[生応答: {user_input}]"
+
+
+class LeapCausalityTestCase(RespondTestCase):
+    """LLM:on を模したスタブで leap の因果を検証する。"""
+
+    def setUp(self):
+        super().setUp()
+        self.llm = StubLLM(self.sfo)
+
+
+class TestLeapScopeSeparation(LeapCausalityTestCase):
+    def test_background_correction_is_not_returned_as_the_answer(self):
+        """
+        回帰テスト: 今回の入力と無関係なノードが熱いだけで、その修正版が
+        今回の応答として返っていた（Hの発生位置と作用Fの適用先の分離漏れ）。
+        """
+        greet = Node(inputs=["こんにちは"], response="やあ", spatial_tag="人")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        resp, _ = self.respond("量子もつれについて考えたい", g, h)
+
+        self.assertNotIn("こんにちは", resp)
+        self.assertEqual(greet.status, "deprecated")  # 裏での修正自体は行われる
+
+    def test_background_correction_does_not_see_the_current_input(self):
+        """
+        回帰テスト: 背景ノードの修正プロンプトに今回の無関係な入力が
+        混入し、修正内容そのものが汚染されていた。
+        """
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        self.respond("量子もつれについて考えたい", g, h)
+
+        self.assertEqual(len(self.llm.revision_calls), 1)
+        _, passed_input = self.llm.revision_calls[0]
+        self.assertIsNone(passed_input)
+
+    def test_current_node_correction_is_returned_with_the_input(self):
+        """今回一致したノード自身が熱い場合は、修正版を応答に使い現在入力も渡す。"""
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        resp, _ = self.respond("こんにちは", g, h)
+
+        self.assertIn("修正版", resp)
+        _, passed_input = self.llm.revision_calls[0]
+        self.assertEqual(passed_input, "こんにちは")
+
+    def test_scope_is_classified_correctly(self):
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        current = main._decide_leap(h, g, "exact", greet, "こんにちは")
+        self.assertEqual(current.scope, "current")
+        self.assertEqual(current.cause, "deny")
+        self.assertEqual(current.trigger_input, "こんにちは")
+
+        background = main._decide_leap(h, g, "miss", None, "無関係")
+        self.assertEqual(background.scope, "background")
+        self.assertIsNone(background.trigger_input)
+
+    def test_phantom_and_unresolved_are_distinguished(self):
+        g = self.graph()
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny("__llm__")
+        self.assertEqual(main._decide_leap(h, g, "miss", None, "x").scope, "phantom")
+
+        h2 = HState(theta=2.0)
+        for _ in range(11):
+            h2.on_miss(None)          # 最近傍が無い未知入力
+        self.assertEqual(main._decide_leap(h2, g, "miss", None, "x").scope, "unresolved")
+
+    def test_no_leap_returns_none(self):
+        g = self.graph(Node(inputs=["こんにちは"], response="やあ"))
+        self.assertIsNone(main._decide_leap(HState(theta=2.0), g, "miss", None, "x"))
+
+
+class TestUnresolvedMissLeap(LeapCausalityTestCase):
+    def test_accumulated_misses_trigger_learning(self):
+        g = self.graph()
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+
+        resp, _ = self.respond("まったく新しい話題", g, h)
+
+        self.assertIn("まったく新しい話題", resp)
+        self.assertIn("まったく新しい話題", self.llm.learned_inputs)
+
+    def test_unresolved_h_is_decayed_even_when_learning_fails(self):
+        """
+        回帰テスト: 消化されなかった蓄積が毎ターン should_leap() の最大値を
+        占め続けると、実ノードのleapが永久に起きなくなる（疑似IDと同じ停止）。
+        """
+        self.llm.node_failure = True
+        g = self.graph()
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+        before = h.H_pre[HState.PENDING_MISS_ID]
+
+        self.respond("まったく新しい話題", g, h)
+
+        self.assertLess(h.H_pre[HState.PENDING_MISS_ID], before)
+
+    def test_unresolved_h_is_decayed_when_this_turn_matched(self):
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+        before = h.H_pre[HState.PENDING_MISS_ID]
+
+        self.respond("こんにちは", g, h)
+
+        self.assertLess(h.H_pre[HState.PENDING_MISS_ID], before)
 
 
 class TestRespondRouting(RespondTestCase):
@@ -234,6 +396,192 @@ class TestMetabolize(RespondTestCase):
         xi = ["まったく無関係な話題"]
         main.metabolize(g, self.sfo, xi, HState(), retire=True)
         self.assertEqual(xi, ["まったく無関係な話題"])
+
+
+class TestAlignmentUpdate(RespondTestCase):
+    """Core §6.1: 整合領域でも dM_B/dt は V_B に沿って微小に動く。"""
+
+    def test_exact_match_reinforces_the_node(self):
+        """
+        回帰テスト: 整合側に dM_B/dt がまったく存在せず（touch と usage_count
+        だけ）、H閾値を境に「何も起きない」から「全面再編」へ不連続に
+        飛んでいた（Core §6.3 整合と跳躍の同一性が成立しない）。
+        """
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        g = self.graph(n)
+        self.respond("こんにちは", g, HState())
+        self.assertGreater(n.confidence, 0.5)
+
+    def test_partial_match_reinforces_less_than_exact(self):
+        exact_node = Node(inputs=["疲れた"], response="休もう", confidence=0.5)
+        partial_node = Node(inputs=["疲れた"], response="休もう", confidence=0.5)
+        self.respond("疲れた", self.graph(exact_node), HState())
+        self.respond("今日はとても疲れた", self.graph(partial_node), HState())
+        self.assertGreater(exact_node.confidence, partial_node.confidence)
+
+    def test_reinforcement_vanishes_as_the_boundary_is_approached(self):
+        """
+        H が θ_eff に近づくほど整合の更新は 0 に漸近する。
+        これにより整合と跳躍が同じ量 H に対する連続な応答になる。
+        """
+        calm = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        self.respond("こんにちは", self.graph(calm), HState(theta=2.0))
+        calm_gain = calm.confidence - 0.5
+
+        hot = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        h = HState(theta=2.0)
+        h.on_deny(hot.id)          # 境界に近い状態
+        h.on_deny(hot.id)
+        self.respond("こんにちは", self.graph(hot), h)
+        hot_gain = hot.confidence - 0.5
+
+        self.assertGreater(calm_gain, hot_gain)
+        self.assertGreaterEqual(hot_gain, 0.0)
+
+    def test_alignment_alone_cannot_reach_full_confidence(self):
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        g = self.graph(n)
+        for _ in range(300):
+            self.respond("こんにちは", g, HState())
+        self.assertLess(n.confidence, 1.0)
+
+    def test_miss_reinforces_nothing(self):
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        g = self.graph(n)
+        self.respond("まったく無関係な話題", g, HState())
+        self.assertEqual(n.confidence, 0.5)
+
+
+class TestKappaScheduling(RespondTestCase):
+    """NN借用 §5 / LangGraph借用 §6: κ による更新率スケジューリングと κ ゲート"""
+
+    def test_established_nodes_update_more_slowly(self):
+        """κ が更新率を絞る（過学習防止 = M_B 絶対性の表現）。"""
+        fresh = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        self.respond("こんにちは", self.graph(fresh), HState())
+        fresh_gain = fresh.confidence - 0.5
+
+        settled = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        settled.usage_count = 40
+        settled.approval_count = 20
+        self.respond("こんにちは", self.graph(settled), HState())
+        settled_gain = settled.confidence - 0.5
+
+        self.assertGreater(fresh_gain, settled_gain)
+
+    def test_low_kappa_response_warns_the_user(self):
+        """
+        確信が固まりすぎたノードで応答する場合、自動更新に任せず
+        ユーザーの判断を仰ぐ（M_B 絶対性の罠を構造的に回避）。
+        """
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=1.0)
+        n.usage_count = 200
+        with mock.patch("builtins.print") as printed:
+            self.respond("こんにちは", self.graph(n), HState())
+        printed_text = " ".join(str(c) for c in printed.call_args_list)
+        self.assertIn("κ=", printed_text)
+
+    def test_normal_node_does_not_warn(self):
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        with mock.patch("builtins.print") as printed:
+            self.respond("こんにちは", self.graph(n), HState())
+        printed_text = " ".join(str(c) for c in printed.call_args_list)
+        self.assertNotIn("κ=", printed_text)
+
+
+class TestMetabolizeDissipation(RespondTestCase):
+    def test_metabolize_dissipates_heat(self):
+        n = Node(inputs=["a"], confidence=0.9)
+        n.usage_count = 10
+        g = self.graph(n)
+        h = HState(theta=2.0)
+        h.on_deny(n.id)
+        before = h.H_post[n.id]
+
+        main.metabolize(g, self.sfo, self.xi, h, retire=False)
+
+        self.assertLess(h.H_post[n.id], before)
+
+    def test_heat_lingers_longer_on_weak_nodes(self):
+        weak = Node(inputs=["a"], confidence=0.1)
+        strong = Node(inputs=["b"], confidence=1.0)
+        strong.usage_count = 30
+        g = self.graph(weak, strong)
+        h = HState(theta=2.0)
+        h.on_deny(weak.id)
+        h.on_deny(strong.id)
+
+        for _ in range(20):
+            main.metabolize(g, self.sfo, self.xi, h, retire=False)
+
+        self.assertGreater(h.H_post[weak.id], h.H_post[strong.id])
+
+
+class TestXiAffectsTheBoundary(RespondTestCase):
+    def test_xi_pool_is_wired_into_the_leap_threshold(self):
+        """
+        回帰テスト: ξプールは存在したが theta を一度も読まず、ξ が動態から
+        切り離されていた（Core §6.2 θ_eff = θ + g(ξ) が未実装）。
+        """
+        n = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(n)
+        h = HState(theta=2.0, rng=random.Random(0))
+        h.on_deny(n.id)
+        h.on_deny(n.id)   # H_post=2.0 — ξが無ければ跳躍しない
+
+        without_xi = main._decide_leap(h, g, "exact", n, "こんにちは", pressure=0.0)
+        self.assertIsNone(without_xi)
+
+        fired = any(
+            main._decide_leap(h, g, "exact", n, "こんにちは", pressure=1.0) is not None
+            for _ in range(30)
+        )
+        self.assertTrue(fired)
+
+
+class TestSeedLoading(RespondTestCase):
+    def test_seed_is_loaded_as_a_scaffold_not_internal_knowledge(self):
+        """
+        回帰テスト: 同梱seedを source="manual" / confidence=0.9 で入れていたため、
+        内部経験の重みが最大(0.8)になり、起動しただけで外部LLMをほとんど
+        信用しないAIになっていた（設計書 §3.7 はseedを仮置きの足場と定める）。
+        """
+        g = self.graph()
+        n = main.load_seed_json(g, "data/seed_v0.1.json")
+        self.assertGreater(n, 0)
+        for node in g.nodes.values():
+            self.assertEqual(node.source, "bootstrap_seed")
+            self.assertAlmostEqual(node.confidence, 0.5)
+
+    def test_startup_still_trusts_the_external_llm(self):
+        """幼少期（起動直後）は外部LLMを足場として使える信用度であること。"""
+        g = self.graph()
+        main.load_seed_json(g, "data/seed_v0.1.json")
+        for tag in main.DOMAIN_TAGS:
+            with self.subTest(domain=tag):
+                self.assertGreater(self.trust.trust_for(g, tag), 0.4)
+
+    def test_trust_falls_once_the_user_actually_validates_the_domain(self):
+        g = self.graph()
+        main.load_seed_json(g, "data/seed_v0.1.json")
+        before = self.trust.trust_for(g, "人")
+        for node in g.nodes.values():
+            if node.spatial_tag == "人":
+                node.approval_count = 5
+                node.usage_count = 3
+        self.assertLess(self.trust.trust_for(g, "人"), before / 2)
+
+    def test_unused_bootstrap_seed_is_retired(self):
+        g = self.graph()
+        main.load_seed_json(g, "data/seed_v0.1.json")
+        for node in g.nodes.values():
+            node.confidence = 0.2
+        main.metabolize(g, self.sfo, self.xi, HState(), retire=False)
+        self.assertTrue(all(n.ttl == 0 for n in g.nodes.values()))
+
+    def test_missing_seed_file_is_harmless(self):
+        g = self.graph()
+        self.assertEqual(main.load_seed_json(g, "data/nope.json"), 0)
 
 
 class TestSessionState(RespondTestCase):
