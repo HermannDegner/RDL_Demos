@@ -101,7 +101,7 @@ def _extract_json(raw: str):
     順に、
       1. 素のテキストとしてパース
       2. コードフェンスの中身をパース
-      3. 最初に現れる {...} / [...] を切り出してパース
+      3. 各 { / [ の位置から raw_decode() し、最初に成立した値を返す
     を試す。すべて失敗したら JSONDecodeError を送出する。
     """
     text = raw.strip()
@@ -119,17 +119,17 @@ def _extract_json(raw: str):
             pass
 
     # フェンスも無く前置きの散文が付いている場合の最後の手段。
-    # オブジェクトと配列のうち、テキスト中で先に現れる方を優先する
-    # （配列の中の最初の { を掴んで一部だけ返してしまわないため）。
-    candidates = []
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        end = text.rfind(closer)
-        if start != -1 and end > start:
-            candidates.append((start, text[start:end + 1]))
-    for _, snippet in sorted(candidates):
+    # 各 { / [ の位置から raw_decode() し、独立して成立する最初の値を返す。
+    # 「最初の開き括弧」と「最後の閉じ括弧」で挟む方式だと、値が2つ並ぶ
+    # 応答（`前置き {"a":1} 補足 {"b":2}`）で両者をまたいだ不正なJSONを
+    # 組み立ててしまい、先頭の値が妥当でも取り出せなかった。
+    # raw_decode は末尾の余分なテキストを無視するため後続の散文も許容でき、
+    # 左から順に試すので配列内の最初の { を掴む心配もない。
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", text):
         try:
-            return json.loads(snippet)
+            value, _ = decoder.raw_decode(text, match.start())
+            return value
         except json.JSONDecodeError:
             continue
 

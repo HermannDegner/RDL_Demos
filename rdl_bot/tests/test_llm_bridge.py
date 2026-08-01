@@ -39,6 +39,31 @@ class TestExtractJson(unittest.TestCase):
         raw = 'はい:\n[{"a": 1}, {"b": 2}]'
         self.assertEqual(_extract_json(raw), [{"a": 1}, {"b": 2}])
 
+    def test_two_separate_embedded_objects_returns_the_first(self):
+        """
+        回帰テスト: 「最初の { と最後の }」で挟む方式だと、値が2つ並ぶ応答で
+        両者をまたいだ不正なJSONを組み立ててしまい、先頭の値が妥当なのに
+        取り出せなかった。
+        """
+        raw = '前置き {"a": 1} 補足 {"b": 2}'
+        self.assertEqual(_extract_json(raw), {"a": 1})
+
+    def test_object_followed_by_array(self):
+        raw = '前置き {"a": 1} 補足 [{"b": 2}]'
+        self.assertEqual(_extract_json(raw), {"a": 1})
+
+    def test_trailing_prose_after_object(self):
+        raw = '{"a": 1}\n\n以上です。'
+        self.assertEqual(_extract_json(raw), {"a": 1})
+
+    def test_nested_object_is_not_truncated(self):
+        raw = 'response: {"outer": {"inner": 1}}'
+        self.assertEqual(_extract_json(raw), {"outer": {"inner": 1}})
+
+    def test_skips_unparsable_opener_and_finds_later_value(self):
+        raw = 'note {not json at all} then {"a": 1}'
+        self.assertEqual(_extract_json(raw), {"a": 1})
+
     def test_fenced_array(self):
         raw = '```json\n[{"a": 1}]\n```'
         self.assertEqual(_extract_json(raw), [{"a": 1}])

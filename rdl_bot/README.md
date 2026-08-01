@@ -164,7 +164,9 @@ LLMは素のJSON・コードフェンス付き・散文の前置き付きのい�
 
 ### 永続化
 
-- `graph.json`：ノードグラフ本体（原子的書き込み。書き込み中断時は `.corrupt` に退避して空グラフから再開）
+- `graph.json`：ノードグラフ本体（原子的書き込み。書き込み中断時は `.corrupt` に退避して空グラフから再開）。
+  学習したノードには生のユーザー入力が入りうる（`llm_learned` の inputs フォールバック、`counterexamples`）ため
+  `.gitignore` 済み。無ければ起動時に `seed_v0.1.json` から作り直される
 - `session_state.json`：`H_pre`/`H_post`/history、θとθ下限、SFOプロファイルとdrift_factor、ξプール、
   LLMモード、ターン数。50ターンごと・`/quit`終了時に保存し、起動時に自動復元する。
   会話由来の内容を含むため `.gitignore` 済み
