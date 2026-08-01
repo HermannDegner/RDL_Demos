@@ -452,6 +452,71 @@ class TestAlignmentUpdate(RespondTestCase):
         self.assertEqual(n.confidence, 0.5)
 
 
+class TestKappaScheduling(RespondTestCase):
+    """NN借用 §5 / LangGraph借用 §6: κ による更新率スケジューリングと κ ゲート"""
+
+    def test_established_nodes_update_more_slowly(self):
+        """κ が更新率を絞る（過学習防止 = M_B 絶対性の表現）。"""
+        fresh = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        self.respond("こんにちは", self.graph(fresh), HState())
+        fresh_gain = fresh.confidence - 0.5
+
+        settled = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        settled.usage_count = 40
+        settled.approval_count = 20
+        self.respond("こんにちは", self.graph(settled), HState())
+        settled_gain = settled.confidence - 0.5
+
+        self.assertGreater(fresh_gain, settled_gain)
+
+    def test_low_kappa_response_warns_the_user(self):
+        """
+        確信が固まりすぎたノードで応答する場合、自動更新に任せず
+        ユーザーの判断を仰ぐ（M_B 絶対性の罠を構造的に回避）。
+        """
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=1.0)
+        n.usage_count = 200
+        with mock.patch("builtins.print") as printed:
+            self.respond("こんにちは", self.graph(n), HState())
+        printed_text = " ".join(str(c) for c in printed.call_args_list)
+        self.assertIn("κ=", printed_text)
+
+    def test_normal_node_does_not_warn(self):
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        with mock.patch("builtins.print") as printed:
+            self.respond("こんにちは", self.graph(n), HState())
+        printed_text = " ".join(str(c) for c in printed.call_args_list)
+        self.assertNotIn("κ=", printed_text)
+
+
+class TestMetabolizeDissipation(RespondTestCase):
+    def test_metabolize_dissipates_heat(self):
+        n = Node(inputs=["a"], confidence=0.9)
+        n.usage_count = 10
+        g = self.graph(n)
+        h = HState(theta=2.0)
+        h.on_deny(n.id)
+        before = h.H_post[n.id]
+
+        main.metabolize(g, self.sfo, self.xi, h, retire=False)
+
+        self.assertLess(h.H_post[n.id], before)
+
+    def test_heat_lingers_longer_on_weak_nodes(self):
+        weak = Node(inputs=["a"], confidence=0.1)
+        strong = Node(inputs=["b"], confidence=1.0)
+        strong.usage_count = 30
+        g = self.graph(weak, strong)
+        h = HState(theta=2.0)
+        h.on_deny(weak.id)
+        h.on_deny(strong.id)
+
+        for _ in range(20):
+            main.metabolize(g, self.sfo, self.xi, h, retire=False)
+
+        self.assertGreater(h.H_post[weak.id], h.H_post[strong.id])
+
+
 class TestXiAffectsTheBoundary(RespondTestCase):
     def test_xi_pool_is_wired_into_the_leap_threshold(self):
         """

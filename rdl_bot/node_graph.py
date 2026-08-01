@@ -1,4 +1,5 @@
 import json
+import math
 import uuid
 import os
 from dataclasses import dataclass, field
@@ -14,6 +15,14 @@ SEED_SOURCES = frozenset({"llm_seed", "bootstrap_seed"})
 # ここを 1.0 にすると、検証されていないノードが承認済みノードと
 # 見分けがつかなくなる。1.0 は明示的な同意(y)でのみ到達する。
 ALIGNMENT_CEILING = 0.9
+
+# 局所 ‖M_B‖ の構成。confidence（Λ相当）を基礎に、実際に使われ承認された
+# 分だけ慣性が強くなる。
+INERTIA_USAGE_WEIGHT = 0.3
+INERTIA_APPROVAL_WEIGHT = 0.5
+
+# κ(M_B) = exp(-‖M_B‖ / M_0) の基準慣性スケール（NN借用 v0.1 §5）。
+KAPPA_M0 = 5.0
 
 # これ未満の類似度しか無いノードは「最近傍」とみなさない。
 # 未知入力のHを、たまたま登録順が早いだけの無関係なノードへ
@@ -85,6 +94,36 @@ class Node:
         })
         if len(self.counterexamples) > 50:
             self.counterexamples = self.counterexamples[-50:]
+
+    def inertia(self) -> float:
+        """
+        このノードが張る局所 M_B の慣性ノルム ‖M_B‖。
+
+        Core §1.4 の入れ子ネットワーク性から、各ノードを下位 M_B として扱う。
+        confidence（Λ相当）を基礎に、実際に使われ・承認された分だけ強くなる。
+        使用と承認は上限を持たないので ‖M_B‖ は発散しうるが、それは
+        「絶対化した構造」に対応する正しい挙動（κ → 0 になる）。
+        """
+        return self.confidence * (
+            1.0
+            + INERTIA_USAGE_WEIGHT * self.usage_count
+            + INERTIA_APPROVAL_WEIGHT * self.approval_count
+        )
+
+    def kappa(self, m_0: float = KAPPA_M0) -> float:
+        """
+        自己修正可能性 κ(M_B) = exp(-‖M_B‖ / M_0)（NN借用 v0.1 §5）。
+
+        κ = 1  慣性が弱く、いくらでも更新できる
+        κ → 0 慣性が強すぎて自分では修正できない（M_B 絶対性）
+
+        κ→0 の領域は「間違っていても直せない」領域なので、
+        自動更新ではなくユーザーの判断を仰ぐべき箇所になる
+        （LangGraph借用 v0.1 §6 の κ ゲート）。
+        """
+        if m_0 <= 0:
+            return 0.0
+        return math.exp(-self.inertia() / m_0)
 
     def reinforce(self, rate: float, ceiling: float = ALIGNMENT_CEILING):
         """
@@ -330,6 +369,28 @@ class NodeGraph:
                 scored.append((node, best_sim))
         scored.sort(key=lambda pair: pair[1], reverse=True)
         return scored[:k]
+
+    def m_b_norm(self) -> float:
+        """
+        グラフ全体の整合慣性ノルム ‖M_B‖。
+        アクティブなノードの局所慣性を L2 ノルムで集約する。
+        関係保存則 ‖M_B‖·D[ξ] = 𝒦 の逆算（Core §4.2）に使う。
+        """
+        squares = sum(n.inertia() ** 2 for n in self.nodes.values() if n.status == "active")
+        return math.sqrt(squares)
+
+    def dissipation_rates(self, gamma: float, cap: float) -> Dict[str, float]:
+        """
+        散逸行列 A の対角成分 a_k = γ·λ_k（NN借用 v0.1 §4）。
+
+        「M_B の得意な方向ほど散逸が速い」＝ 慣性の強いノードほど熱を
+        速く逃がし、弱いノードには熱が残る。固有分解を持たないため、
+        固有値 λ_k の代理として各ノードの局所慣性を使う。
+        """
+        return {
+            nid: min(cap, gamma * node.inertia())
+            for nid, node in self.nodes.items()
+        }
 
     def stats(self) -> Dict[str, int]:
         total = len(self.nodes)

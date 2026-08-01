@@ -69,6 +69,51 @@ class TestThetaEff(unittest.TestCase):
         self.assertIn("θ_eff", HState(theta=2.0).summary(0.5))
 
 
+class TestDissipation(unittest.TestCase):
+    """NN借用 v0.1 §4: dH_vec/dt の -A·H_vec 項"""
+
+    def test_heat_dissipates_passively(self):
+        """
+        回帰テスト: H が自然に減る経路が無く、完全ヒット・同意・leap という
+        離散イベントでしか下がらなかった。
+        """
+        h = HState(theta=2.0)
+        h.on_deny("A")
+        h.dissipate({"A": 0.1})
+        self.assertAlmostEqual(h.H_post["A"], 0.9)
+
+    def test_dissipation_applies_to_both_pre_and_post(self):
+        h = HState(theta=2.0)
+        h.on_miss("A")
+        h.on_deny("A")
+        h.dissipate({"A": 0.5})
+        self.assertAlmostEqual(h.H_pre["A"], 0.25)
+        self.assertAlmostEqual(h.H_post["A"], 0.5)
+
+    def test_heat_lingers_on_weak_directions(self):
+        """慣性の弱い方向ほど熱が残ること（散逸速度の差が指向性を作る）。"""
+        h = HState(theta=2.0)
+        h.on_deny("strong")
+        h.on_deny("weak")
+        for _ in range(10):
+            h.dissipate({"strong": 0.15, "weak": 0.005})
+        self.assertGreater(h.H_post["weak"], h.H_post["strong"])
+
+    def test_unknown_ids_are_ignored(self):
+        h = HState(theta=2.0)
+        h.dissipate({"nope": 0.5})   # 例外を出さないこと
+        self.assertEqual(h.H_post, {})
+
+    def test_rate_is_clamped(self):
+        h = HState(theta=2.0)
+        h.on_deny("A")
+        h.dissipate({"A": 5.0})
+        self.assertEqual(h.H_post["A"], 0.0)
+        h.on_deny("B")
+        h.dissipate({"B": -1.0})
+        self.assertEqual(h.H_post["B"], 1.0)
+
+
 class TestMergedH(unittest.TestCase):
     def test_combines_pre_and_post_with_weights(self):
         h = HState(theta=2.0)

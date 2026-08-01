@@ -138,7 +138,13 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
                 print("  on / off / once を指定してください")
 
     elif name == "/h":
-        print(f"  {h.summary(xi_pressure(xi_pool))}")
+        pressure = xi_pressure(xi_pool)
+        print(f"  {h.summary(pressure)}")
+        # 関係保存則 ‖M_B‖·D[ξ] = 𝒦 の逆算（Core §4.2）。
+        # 𝒦 は直接観測できないので積として逆算するだけで、制御には使わない。
+        m_b = graph.m_b_norm()
+        print(f"  ‖M_B‖={m_b:.2f}  D[ξ]≈{pressure:.2f}  𝒦≈{m_b * pressure:.2f}"
+              f"   （𝒦は逆算値。制御には使わない）")
 
     elif name == "/sfo":
         print(f"  AI_SFOプロファイル: {sfo_profile.to_dict()}")
@@ -200,6 +206,10 @@ _turn_count = 0
 def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_state: HState, retire: bool = False):
     """M_Δ相: 定期再編フェーズ (設計書 v0.3 §3.6)"""
     print("  [M_Δ相] 代謝フェーズ開始...")
+
+    # 0. 熱の散逸 dH_vec/dt の -A·H_vec 項（NN借用 v0.1 §4）。
+    # 慣性の強い（M_Bの得意な）方向ほど速く冷め、弱い方向に熱が残る。
+    h_state.dissipate(graph.dissipation_rates(DISSIPATION_GAMMA, DISSIPATION_CAP))
 
     # 1. 低confidence・低使用頻度ノードのTTL減算と削除
     for n in list(graph.nodes.values()):
@@ -313,23 +323,48 @@ class LeapDecision:
 ALIGN_RATE_EXACT = 0.04
 ALIGN_RATE_PARTIAL = 0.02
 
+# これ未満の κ は「自力では修正できない」領域とみなし、ユーザーに判断を促す。
+KAPPA_HITL_THRESHOLD = 0.15
+
+# 散逸行列 A の係数。a_k = γ·λ_k を cap で頭打ちにする（NN借用 v0.1 §4）。
+DISSIPATION_GAMMA = 0.01
+DISSIPATION_CAP = 0.15
+
 
 def _reinforce_along_v_b(node: Node, h: HState, pressure: float, base_rate: float) -> None:
     """
     整合領域（H < θ_eff）における dM_B/dt を適用する（Core §6.1）。
 
-    更新量は θ_eff への近さで連続的に減衰させる。H が 0 なら満額、
-    θ_eff に近づくほど 0 に漸近し、超えれば跳躍側（_correct_node）へ移る。
-    これにより整合と跳躍が「同じ量 H に対する連続な応答」になり、
-    Core §6.3 の同一性に一歩近づく。以前は整合側の dM_B/dt が
-    そもそも存在せず（touch と usage_count だけ）、H閾値を境に
-    「何も起きない」から「全面再編」へ不連続に飛んでいた。
+    更新量は二つの係数で絞る：
+      slack : θ_eff への近さ。H が 0 なら満額、θ_eff に近づくほど 0 に漸近し、
+              超えれば跳躍側（_correct_node）へ移る。これにより整合と跳躍が
+              「同じ量 H に対する連続な応答」になる（Core §6.3）
+      κ     : 自己修正可能性（NN借用 v0.1 §1 の dM_B/dt = κ·η·E·F^T ...）。
+              慣性が強くなるほど更新率が下がる＝過学習防止であり、
+              同時に「固まった構造は自分では動かない」という M_B 絶対性の表現
+
+    以前は整合側の dM_B/dt がそもそも存在せず（touch と usage_count だけ）、
+    H閾値を境に「何も起きない」から「全面再編」へ不連続に飛んでいた。
     """
     theta_eff = h.theta_eff(pressure)
     if theta_eff <= 0:
         return
     slack = max(0.0, 1.0 - h.merged_h(node.id) / theta_eff)
-    node.reinforce(base_rate * slack)
+    node.reinforce(base_rate * slack * node.kappa())
+
+
+def _warn_if_self_correction_is_lost(node: Node) -> None:
+    """
+    κ→0 の領域（LangGraph借用 v0.1 §6 の κ ゲート）。
+
+    慣性が固まりすぎて自力では修正できないノードで応答している場合、
+    自動更新に任せず、ユーザーの判断を仰ぐべき箇所であることを示す。
+    「確信が固まっている時こそレビューが要る」を構造から出す。
+    """
+    kappa = node.kappa()
+    if kappa < KAPPA_HITL_THRESHOLD:
+        print(f"  [κ={kappa:.3f} — この応答は慣性が固まっており自力で修正できません。"
+              f"誤っていれば n で否定してください]")
 
 
 def _decide_leap(h: HState, graph: NodeGraph, match_type: str, node: Optional[Node],
@@ -559,11 +594,13 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
 
     if match_type == "exact" and node.status not in ("quarantined", "deprecated"):
         graph.save()
+        _warn_if_self_correction_is_lost(node)
         resp = node.response or f"[{node.rdl_type}] {user_input}"
         return resp, node.id
 
     if match_type == "partial" and node.status not in ("quarantined", "deprecated"):
         graph.save()
+        _warn_if_self_correction_is_lost(node)
         resp = node.response or f"[{node.rdl_type}（部分一致）] {user_input}"
         return resp, node.id
 

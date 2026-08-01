@@ -142,6 +142,25 @@ class HState:
         self.H_post[node_id] = self.H_post.get(node_id, 0) * 0.3
         self.theta = min(self.theta * 1.05, 5.0)
 
+    def dissipate(self, rates: Dict[str, float]) -> None:
+        """
+        dH_vec/dt の散逸項 −A·H_vec を1ステップ適用する（NN借用 v0.1 §4）。
+
+        rates はノードごとの散逸速度 a_k = γ·λ_k。慣性の強い（＝M_Bの得意な）
+        方向ほど速く熱を逃がし、弱い方向には熱が残る。
+
+        以前は H が自然に減る経路が無く、完全ヒット・同意・leap という
+        離散イベントでしか下がらなかった。そのため「M_B の苦手な方向に
+        熱が蓄積する」という指向性が生まれず、どのノードも同じ速度で
+        しか冷めなかった。
+        """
+        for nid, rate in rates.items():
+            factor = 1.0 - max(0.0, min(1.0, rate))
+            if nid in self.H_pre:
+                self.H_pre[nid] *= factor
+            if nid in self.H_post:
+                self.H_post[nid] *= factor
+
     def relax_theta(self, factor: float = 0.97):
         """
         θを初期値へ向けてゆっくり戻す（M_Δ相から呼ばれる）。

@@ -253,6 +253,37 @@ class TestLifecycle(GraphTestCase):
         n.touch()
         self.assertEqual(n.ttl, 100)
 
+    def test_inertia_grows_with_confidence_usage_and_approval(self):
+        base = Node(inputs=["x"], confidence=0.5)
+        used = Node(inputs=["x"], confidence=0.5)
+        used.usage_count = 10
+        approved = Node(inputs=["x"], confidence=0.5)
+        approved.approval_count = 10
+        self.assertGreater(used.inertia(), base.inertia())
+        self.assertGreater(approved.inertia(), base.inertia())
+
+    def test_kappa_falls_as_inertia_grows(self):
+        """NN借用 §5: κ(M_B) = exp(-‖M_B‖/M_0)。慣性が強いほど更新しにくい。"""
+        soft = Node(inputs=["x"], confidence=0.2)
+        hard = Node(inputs=["x"], confidence=1.0)
+        hard.usage_count = 30
+        hard.approval_count = 20
+        self.assertGreater(soft.kappa(), hard.kappa())
+
+    def test_kappa_stays_in_unit_range(self):
+        for conf, usage, approval in ((0.0, 0, 0), (1.0, 0, 0), (1.0, 500, 500)):
+            n = Node(inputs=["x"], confidence=conf)
+            n.usage_count, n.approval_count = usage, approval
+            with self.subTest(conf=conf, usage=usage):
+                self.assertGreaterEqual(n.kappa(), 0.0)
+                self.assertLessEqual(n.kappa(), 1.0)
+
+    def test_absolutised_structure_loses_self_correction(self):
+        """‖M_B‖ → 大 で κ → 0（M_B 絶対性）。"""
+        n = Node(inputs=["x"], confidence=1.0)
+        n.usage_count = 200
+        self.assertLess(n.kappa(), 0.01)
+
     def test_reinforce_approaches_the_ceiling_without_exceeding_it(self):
         """
         Core §6.1 の整合側 dM_B/dt。使われ続けるだけでは天井までしか
@@ -338,6 +369,42 @@ class TestPersistence(GraphTestCase):
         g.save()
         with open(nested, encoding="utf-8") as f:
             self.assertEqual(len(json.load(f)), 1)
+
+
+class TestMBNormAndDissipation(GraphTestCase):
+    def test_m_b_norm_grows_with_the_graph(self):
+        g = self.graph(Node(inputs=["a"], confidence=0.5))
+        before = g.m_b_norm()
+        g.add(Node(inputs=["b"], confidence=0.5))
+        self.assertGreater(g.m_b_norm(), before)
+
+    def test_m_b_norm_of_empty_graph_is_zero(self):
+        self.assertEqual(self.graph().m_b_norm(), 0.0)
+
+    def test_m_b_norm_ignores_inactive_nodes(self):
+        active = Node(inputs=["a"], confidence=0.5)
+        dead = Node(inputs=["b"], confidence=0.5)
+        dead.status = "quarantined"
+        g = self.graph(active, dead)
+        self.assertAlmostEqual(g.m_b_norm(), self.graph(active).m_b_norm())
+
+    def test_strong_directions_dissipate_faster(self):
+        """
+        NN借用 §4: 「M_B の得意な方向ほど散逸が速い」＝
+        熱は苦手な（慣性の弱い）方向に残る。
+        """
+        weak = Node(inputs=["a"], confidence=0.2)
+        strong = Node(inputs=["b"], confidence=1.0)
+        strong.usage_count = 10
+        g = self.graph(weak, strong)
+        rates = g.dissipation_rates(gamma=0.01, cap=0.15)
+        self.assertGreater(rates[strong.id], rates[weak.id])
+
+    def test_dissipation_rate_is_capped(self):
+        n = Node(inputs=["a"], confidence=1.0)
+        n.usage_count = 1000
+        g = self.graph(n)
+        self.assertLessEqual(g.dissipation_rates(gamma=0.01, cap=0.15)[n.id], 0.15)
 
 
 class TestStats(GraphTestCase):
