@@ -41,6 +41,167 @@ class RespondTestCase(unittest.TestCase):
         return main.respond(text, graph, h, self.llm, self.sfo, self.xi, self.trust)
 
 
+class StubLLM(LLMBridge):
+    """
+    LLM:on を模したスタブ。API を呼ばずに、修正・学習の呼び出し内容を記録する。
+    """
+
+    def __init__(self, sfo):
+        super().__init__(sfo)
+        self.mode = "on"
+        self.revision_calls = []   # (hot_node, user_input)
+        self.learned_inputs = []
+        self.node_failure = False
+
+    def available(self):
+        return True
+
+    def ask_for_node_revision(self, hot_node, user_input=None):
+        self.revision_calls.append((hot_node, user_input))
+        return Node(inputs=list(hot_node.inputs), rdl_type="修正",
+                    response=f"[{hot_node.inputs[0]}の修正版]", source="llm_learned")
+
+    def ask_for_node(self, user_input):
+        self.learned_inputs.append(user_input)
+        if self.node_failure:
+            return None
+        return Node(inputs=[user_input], rdl_type="新規",
+                    response=f"[{user_input}を学習]", source="llm_learned")
+
+    def ask(self, user_input, context=""):
+        return f"[生応答: {user_input}]"
+
+
+class LeapCausalityTestCase(RespondTestCase):
+    """LLM:on を模したスタブで leap の因果を検証する。"""
+
+    def setUp(self):
+        super().setUp()
+        self.llm = StubLLM(self.sfo)
+
+
+class TestLeapScopeSeparation(LeapCausalityTestCase):
+    def test_background_correction_is_not_returned_as_the_answer(self):
+        """
+        回帰テスト: 今回の入力と無関係なノードが熱いだけで、その修正版が
+        今回の応答として返っていた（Hの発生位置と作用Fの適用先の分離漏れ）。
+        """
+        greet = Node(inputs=["こんにちは"], response="やあ", spatial_tag="人")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        resp, _ = self.respond("量子もつれについて考えたい", g, h)
+
+        self.assertNotIn("こんにちは", resp)
+        self.assertEqual(greet.status, "deprecated")  # 裏での修正自体は行われる
+
+    def test_background_correction_does_not_see_the_current_input(self):
+        """
+        回帰テスト: 背景ノードの修正プロンプトに今回の無関係な入力が
+        混入し、修正内容そのものが汚染されていた。
+        """
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        self.respond("量子もつれについて考えたい", g, h)
+
+        self.assertEqual(len(self.llm.revision_calls), 1)
+        _, passed_input = self.llm.revision_calls[0]
+        self.assertIsNone(passed_input)
+
+    def test_current_node_correction_is_returned_with_the_input(self):
+        """今回一致したノード自身が熱い場合は、修正版を応答に使い現在入力も渡す。"""
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        resp, _ = self.respond("こんにちは", g, h)
+
+        self.assertIn("修正版", resp)
+        _, passed_input = self.llm.revision_calls[0]
+        self.assertEqual(passed_input, "こんにちは")
+
+    def test_scope_is_classified_correctly(self):
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny(greet.id)
+
+        current = main._decide_leap(h, g, "exact", greet, "こんにちは")
+        self.assertEqual(current.scope, "current")
+        self.assertEqual(current.cause, "deny")
+        self.assertEqual(current.trigger_input, "こんにちは")
+
+        background = main._decide_leap(h, g, "miss", None, "無関係")
+        self.assertEqual(background.scope, "background")
+        self.assertIsNone(background.trigger_input)
+
+    def test_phantom_and_unresolved_are_distinguished(self):
+        g = self.graph()
+        h = HState(theta=2.0)
+        for _ in range(3):
+            h.on_deny("__llm__")
+        self.assertEqual(main._decide_leap(h, g, "miss", None, "x").scope, "phantom")
+
+        h2 = HState(theta=2.0)
+        for _ in range(11):
+            h2.on_miss(None)          # 最近傍が無い未知入力
+        self.assertEqual(main._decide_leap(h2, g, "miss", None, "x").scope, "unresolved")
+
+    def test_no_leap_returns_none(self):
+        g = self.graph(Node(inputs=["こんにちは"], response="やあ"))
+        self.assertIsNone(main._decide_leap(HState(theta=2.0), g, "miss", None, "x"))
+
+
+class TestUnresolvedMissLeap(LeapCausalityTestCase):
+    def test_accumulated_misses_trigger_learning(self):
+        g = self.graph()
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+
+        resp, _ = self.respond("まったく新しい話題", g, h)
+
+        self.assertIn("まったく新しい話題", resp)
+        self.assertIn("まったく新しい話題", self.llm.learned_inputs)
+
+    def test_unresolved_h_is_decayed_even_when_learning_fails(self):
+        """
+        回帰テスト: 消化されなかった蓄積が毎ターン should_leap() の最大値を
+        占め続けると、実ノードのleapが永久に起きなくなる（疑似IDと同じ停止）。
+        """
+        self.llm.node_failure = True
+        g = self.graph()
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+        before = h.H_pre[HState.PENDING_MISS_ID]
+
+        self.respond("まったく新しい話題", g, h)
+
+        self.assertLess(h.H_pre[HState.PENDING_MISS_ID], before)
+
+    def test_unresolved_h_is_decayed_when_this_turn_matched(self):
+        greet = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(greet)
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+        before = h.H_pre[HState.PENDING_MISS_ID]
+
+        self.respond("こんにちは", g, h)
+
+        self.assertLess(h.H_pre[HState.PENDING_MISS_ID], before)
+
+
 class TestRespondRouting(RespondTestCase):
     def test_exact_match_returns_node_response(self):
         n = Node(inputs=["こんにちは"], response="やあ")

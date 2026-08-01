@@ -105,6 +105,63 @@ class TestForgetAndPrune(unittest.TestCase):
         h.on_deny("alive")
         self.assertEqual(h.prune({"alive", "other"}), 0)
 
+    def test_prune_keeps_the_pending_miss_bucket(self):
+        """未解決入力の蓄積は実ノードではないが、退場処理の巻き添えにしない。"""
+        h = HState(theta=2.0)
+        h.on_miss(None)
+        h.prune(set())
+        self.assertIn(HState.PENDING_MISS_ID, h.H_pre)
+
+
+class TestPendingMiss(unittest.TestCase):
+    def test_miss_without_nearest_goes_to_the_pending_bucket(self):
+        """
+        回帰テスト: 最近傍が無い未知入力のHを無関係な既存ノードへ積むと、
+        そのノードが後で誤って修正・隔離の対象に選ばれてしまう。
+        """
+        h = HState(theta=2.0)
+        h.on_miss(None)
+        self.assertEqual(list(h.H_pre), [HState.PENDING_MISS_ID])
+
+    def test_miss_with_nearest_goes_to_that_node(self):
+        h = HState(theta=2.0)
+        h.on_miss("near-node")
+        self.assertEqual(list(h.H_pre), ["near-node"])
+
+    def test_pending_bucket_can_reach_the_threshold(self):
+        h = HState(theta=2.0)
+        for _ in range(11):
+            h.on_miss(None)
+        self.assertEqual(h.should_leap(), (True, HState.PENDING_MISS_ID))
+
+    def test_resolve_miss_defaults_to_the_pending_bucket(self):
+        h = HState(theta=2.0)
+        h.on_miss(None)
+        before = h.H_pre[HState.PENDING_MISS_ID]
+        h.resolve_miss(None)
+        self.assertLess(h.H_pre[HState.PENDING_MISS_ID], before)
+
+
+class TestEventTracking(unittest.TestCase):
+    def test_dominant_cause(self):
+        h = HState(theta=2.0)
+        h.on_miss("A")
+        for _ in range(3):
+            h.on_deny("A")
+        self.assertEqual(h.dominant_cause("A"), "deny")
+
+    def test_dominant_cause_of_untouched_node(self):
+        self.assertEqual(HState().dominant_cause("nope"), "unknown")
+
+    def test_last_event_seq_increases(self):
+        h = HState(theta=2.0)
+        h.on_deny("A")
+        first = h.last_event_seq("A")
+        h.on_deny("B")
+        h.on_deny("A")
+        self.assertGreater(h.last_event_seq("A"), first)
+        self.assertEqual(HState().last_event_seq("nope"), 0)
+
 
 class TestDriftDeltas(unittest.TestCase):
     def test_events_are_counted_once(self):

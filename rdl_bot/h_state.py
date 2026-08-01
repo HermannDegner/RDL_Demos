@@ -18,6 +18,12 @@ class HistoryEntry:
 
 
 class HState:
+    # 最近傍ノードが無い未知入力のHを積む先。実ノードIDではないが、
+    # 「未解決の入力が溜まっている」という意味のある蓄積なので、
+    # __llm__ などの解決不能な疑似IDとは区別して扱う
+    # （leapすると新規ノード学習になる）。
+    PENDING_MISS_ID = "__unresolved__"
+
     def __init__(self, theta: float = 2.0):
         self.H_pre: dict[str, float] = {}   # 入力時のノードミスH（軽い）
         self.H_post: dict[str, float] = {}  # 応答後のユーザー反応H（重い）
@@ -29,8 +35,13 @@ class HState:
 
     # --- H_pre 更新 ---
 
-    def on_miss(self, context_node_id: str = "__none__"):
-        self._add_pre(context_node_id, 0.5, "miss")
+    def on_miss(self, context_node_id: Optional[str] = None):
+        """
+        未知入力のHを積む。context_node_id が None（＝十分に似た既存ノードが
+        無い）なら PENDING_MISS_ID に積む。無関係なノードへ積むと、
+        そのノードが後で誤って修正・隔離の対象に選ばれてしまう。
+        """
+        self._add_pre(context_node_id or self.PENDING_MISS_ID, 0.5, "miss")
 
     def on_partial(self, node_id: str):
         self._add_pre(node_id, 0.2, "partial")
@@ -106,17 +117,38 @@ class HState:
         グラフに存在しないノードIDのH蓄積をまとめて破棄する。破棄件数を返す。
         M_Δ相の retire_dead_nodes() 後に呼ぶことで、退場済みノードのHが
         永久に残り続けるのを防ぐ。
+        PENDING_MISS_ID は実ノードではないが未解決入力の正当な蓄積先
+        なので、退場処理の巻き添えにしない。
         """
-        valid = set(valid_node_ids)
+        valid = set(valid_node_ids) | {self.PENDING_MISS_ID}
         stale = (set(self.H_pre) | set(self.H_post)) - valid
         for nid in stale:
             self.forget(nid)
         return len(stale)
 
+    def last_event_seq(self, node_id: str) -> int:
+        """そのノードに最後に起きたイベントの通番。leapの追跡用。"""
+        for entry in reversed(self.history):
+            if entry.node_id == node_id:
+                return entry.seq
+        return 0
+
+    def dominant_cause(self, node_id: str) -> str:
+        """
+        そのノードのHを最も押し上げた原因を返す。leapの記録用で、
+        制御には使わない。
+        """
+        weights = {"deny": 0.0, "rephrase": 0.0, "miss": 0.0, "silence": 0.0}
+        for entry in self.history:
+            if entry.node_id == node_id and entry.event in weights:
+                weights[entry.event] += abs(entry.delta)
+        cause = max(weights, key=lambda k: weights[k])
+        return cause if weights[cause] > 0 else "unknown"
+
     def on_llm_call(self, node_id: str = "__llm__"):
         self._log(node_id, "llm_call", 0.1) # LLM呼び出しも履歴として記録
 
-    def resolve_miss(self, context_node_id: str, factor: float = 0.3):
+    def resolve_miss(self, context_node_id: Optional[str] = None, factor: float = 0.3):
         """
         未知入力がH閾値を待たずに新規ノード生成（ドメイン信用度による
         早期相談など）で解決された場合、その原因となったmiss分の
@@ -124,9 +156,10 @@ class HState:
         既存ノードにHが積み上がり続け、後で誤って修正対象に
         選ばれてしまう。
         """
-        if context_node_id in self.H_pre:
-            self.H_pre[context_node_id] *= factor
-            self._log(context_node_id, "miss_resolved", 0.0)
+        nid = context_node_id or self.PENDING_MISS_ID
+        if nid in self.H_pre:
+            self.H_pre[nid] *= factor
+            self._log(nid, "miss_resolved", 0.0)
 
     # --- 状態表示 ---
 

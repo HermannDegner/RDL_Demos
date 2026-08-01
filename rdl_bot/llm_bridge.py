@@ -226,12 +226,16 @@ JSON形式で返してください（他のテキスト不要）。
             print(raw)
             return None
 
-    def ask_for_node_revision(self, hot_node: Node, user_input: str) -> Optional[Node]:
+    def ask_for_node_revision(self, hot_node: Node, user_input: Optional[str] = None) -> Optional[Node]:
         """
         既に否定が閾値を超えて蓄積した既存ノード（hot_node）を修正するためのノードを生成する。
         ask_for_node と異なり、「今回たまたま入力された文」ではなく
         「否定され続けている既存ノードの登録パターン・旧応答・否定理由」を渡し、
         leapの学習対象を実際にHが溜まった箇所と一致させる。
+
+        user_input は「今回の入力がこのノード自身に一致した」場合だけ渡す。
+        Hが溜まっているのが今回と無関係な背景ノードのときにまで現在入力を
+        渡すと、修正内容がその無関係な話題に引きずられる。
         """
         if not self.client:
             return None
@@ -242,6 +246,8 @@ JSON形式で返してください（他のテキスト不要）。
             for c in recent_counterexamples
         ) or "（記録なし）"
 
+        trigger_line = f'\n今回あらためて入力された文: "{user_input}"' if user_input else ""
+
         prompt = f"""以下は、あるRDLノードがユーザーから繰り返し否定・言い換え要求を受けている状況です。
 このノードを修正した新しいノードをRDL語彙で生成してください。
 JSON形式で返してください（他のテキスト不要）。
@@ -250,8 +256,7 @@ JSON形式で返してください（他のテキスト不要）。
 既存ノードの応答（否定されている内容）: "{hot_node.response}"
 既存ノードのrdl_type: "{hot_node.rdl_type}"
 直近の否定・言い換え履歴:
-{counterexample_lines}
-今回あらためて入力された文: "{user_input}"
+{counterexample_lines}{trigger_line}
 
 返すJSON:
 {{

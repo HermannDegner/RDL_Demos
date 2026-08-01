@@ -6,6 +6,12 @@ from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
 
+# これ未満の類似度しか無いノードは「最近傍」とみなさない。
+# 未知入力のHを、たまたま登録順が早いだけの無関係なノードへ
+# 積み上げてしまうのを防ぐ。
+MIN_NEAREST_SIMILARITY = 0.05
+
+
 def _char_ngrams(text: str, n: int = 2) -> set:
     """
     日本語は分かち書きされていないため、空白split()による単語比較では
@@ -189,31 +195,59 @@ class NodeGraph:
             return None
         return current
 
+    def _prefer_user_node(self, candidate: Node, user_input: str, allow_substring: bool) -> Node:
+        """
+        候補が llm_seed（教わっただけの足場）なら、同じ入力を持つ
+        ユーザー由来ノードがあればそちらを優先する。
+        """
+        if candidate.source != "llm_seed":
+            return candidate
+        text_lower = user_input.lower()
+        for node in self.nodes.values():
+            if node.id == candidate.id or node.source == "llm_seed":
+                continue
+            patterns = [p.lower() for p in node.inputs]
+            hit = text_lower in patterns
+            if not hit and allow_substring:
+                hit = any(p in text_lower for p in patterns)
+            if hit and node.confidence > candidate.confidence:
+                return node
+        return candidate
+
     def search(self, user_input: str) -> Tuple[Optional[Node], str, Optional[Node]]:
         """
         ユーザー入力に最も一致するノードを検索する。
         返り値: (node, match_type, nearest_node)
         match_type: "exact", "partial", "miss"
+
+        候補は「最良の1件」ではなくスコア順のリストで持ち、上から順に
+        _resolve_active() を通して最初に有効だったものを返す。
+        以前は最良候補1件だけを確定させていたため、同じ入力を持つ
+        高confidenceの quarantined ノードが、低confidenceでも active な
+        ノードを覆い隠して miss になっていた（応答できるノードが
+        存在するのに使われない）。
+
+        nearest_node は類似度が MIN_NEAREST_SIMILARITY 未満なら None を返す。
+        以前は max_similarity を -1.0 から始めていたため、どのパターンとも
+        文字が重ならない入力でも「最初に走査されたノード」が最近傍に
+        なってしまい、無関係なノードに miss の H_pre が積み上がっていた。
         """
         text_lower = user_input.lower()
-        best_exact_node = None
-        best_partial_node = None
-        best_exact_score = 0.0
-        best_partial_score = 0.0
+        exact_candidates: List[Tuple[float, Node]] = []
+        partial_candidates: List[Tuple[float, Node]] = []
 
-        # nearest_node は HState の on_miss で使われるため、常に返す
         nearest_node = None
-        max_similarity = -1.0
+        max_similarity = 0.0
         text_grams = _char_ngrams(text_lower)
 
         for node in self.nodes.values():
+            best_exact = None
+            best_partial = 0.0
             for pattern in node.inputs:
                 pattern_lower = pattern.lower()
                 # 完全一致に近いものを優先
                 if text_lower == pattern_lower:
-                    if node.confidence > best_exact_score:
-                        best_exact_score = node.confidence
-                        best_exact_node = node
+                    best_exact = node.confidence
                 # 部分一致
                 elif pattern_lower in text_lower or text_lower in pattern_lower:
                     # 部分一致のスコア = 短い方/長い方 * confidence。
@@ -222,9 +256,7 @@ class NodeGraph:
                     shorter = min(len(pattern_lower), len(text_lower))
                     longer = max(len(pattern_lower), len(text_lower), 1)
                     score = (shorter / longer) * node.confidence
-                    if score > best_partial_score:
-                        best_partial_score = score
-                        best_partial_node = node
+                    best_partial = max(best_partial, score)
 
                 # 最近傍ノードの特定：文字N-gramのJaccard類似度で測る
                 # （空白split()は日本語では機能しないため）
@@ -233,35 +265,24 @@ class NodeGraph:
                     max_similarity = similarity
                     nearest_node = node
 
-        # llm_seed の置換ロジックを考慮
-        # ユーザー由来のノード（manual, llm_learned, graph_composed）を優先
-        if best_exact_node:
-            candidate = best_exact_node
-            if candidate.source == "llm_seed":
-                for node in self.nodes.values():
-                    if (node.id != candidate.id and node.source != "llm_seed"
-                            and user_input.lower() in [p.lower() for p in node.inputs]
-                            and node.confidence > candidate.confidence):
-                        candidate = node
-                        break
-            resolved = self._resolve_active(candidate)
-            if resolved is not None:
-                return resolved, "exact", resolved
+            if best_exact is not None:
+                exact_candidates.append((best_exact, node))
+            elif best_partial > 0:
+                partial_candidates.append((best_partial, node))
 
-        if best_partial_node:
-            candidate = best_partial_node
-            if candidate.source == "llm_seed":
-                for node in self.nodes.values():
-                    if (node.id != candidate.id and node.source != "llm_seed"
-                            and (user_input.lower() in [p.lower() for p in node.inputs]
-                                 or any(p.lower() in user_input.lower() for p in node.inputs))
-                            and node.confidence > candidate.confidence):
-                        candidate = node
-                        break
-            resolved = self._resolve_active(candidate)
-            if resolved is not None:
-                return resolved, "partial", resolved
+        for candidates, match_type, allow_substring in (
+            (exact_candidates, "exact", False),
+            (partial_candidates, "partial", True),
+        ):
+            candidates.sort(key=lambda pair: pair[0], reverse=True)
+            for _, candidate in candidates:
+                candidate = self._prefer_user_node(candidate, user_input, allow_substring)
+                resolved = self._resolve_active(candidate)
+                if resolved is not None:
+                    return resolved, match_type, resolved
 
+        if max_similarity < MIN_NEAREST_SIMILARITY:
+            nearest_node = None
         return None, "miss", nearest_node
 
     def top_k_similar(self, user_input: str, k: int = 3) -> List[Tuple[Node, float]]:

@@ -74,6 +74,24 @@ class TestSearch(GraphTestCase):
         self.assertEqual(kind, "miss")
         self.assertIsNone(nearest)
 
+    def test_unrelated_input_has_no_nearest(self):
+        """
+        回帰テスト: max_similarity を -1.0 から始めていたため、どのパターンとも
+        文字が重ならない入力でも「最初に走査されたノード」が最近傍になり、
+        無関係なノードに miss の H_pre が積み上がっていた。
+        """
+        g = self.graph(Node(inputs=["ABCDEF"]), Node(inputs=["GHIJKL"]))
+        node, kind, nearest = g.search("ぬめり")
+        self.assertEqual(kind, "miss")
+        self.assertIsNone(nearest)
+
+    def test_slightly_similar_input_still_has_nearest(self):
+        n = Node(inputs=["今日は疲れた"])
+        g = self.graph(n)
+        _, kind, nearest = g.search("今日は眠い")
+        self.assertEqual(kind, "miss")
+        self.assertEqual(nearest.id, n.id)
+
     def test_partial_score_prefers_closer_length(self):
         """
         回帰テスト: 以前のスコアは len(pattern)/len(text) だったため、
@@ -102,6 +120,48 @@ class TestSearch(GraphTestCase):
 
 
 class TestStatusResolution(GraphTestCase):
+    def test_quarantined_node_does_not_shadow_an_active_one(self):
+        """
+        回帰テスト: 候補を最良1件だけ確定させていたため、同じ入力を持つ
+        高confidenceの quarantined ノードが、低confidenceでも active な
+        ノードを覆い隠して miss になっていた。
+        """
+        blocked = Node(inputs=["ありがとう"], response="隔離された応答", confidence=0.9)
+        blocked.status = "quarantined"
+        usable = Node(inputs=["ありがとう"], response="正常な応答", confidence=0.8)
+        g = self.graph(blocked, usable)
+        node, kind, _ = g.search("ありがとう")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(node.id, usable.id)
+
+    def test_quarantined_does_not_shadow_on_partial_match(self):
+        blocked = Node(inputs=["疲れた"], response="隔離", confidence=0.9)
+        blocked.status = "quarantined"
+        usable = Node(inputs=["疲れた"], response="正常", confidence=0.8)
+        g = self.graph(blocked, usable)
+        node, kind, _ = g.search("今日はとても疲れた")
+        self.assertEqual(kind, "partial")
+        self.assertEqual(node.id, usable.id)
+
+    def test_deprecated_shadowing_redirects_instead_of_missing(self):
+        successor = Node(inputs=["新"], response="後継")
+        old = Node(inputs=["ありがとう"], response="旧", confidence=0.9)
+        old.status = "deprecated"
+        old.relations.append(successor.id)
+        other = Node(inputs=["ありがとう"], response="別の正常ノード", confidence=0.5)
+        g = self.graph(old, successor, other)
+        node, kind, _ = g.search("ありがとう")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(node.id, successor.id)
+
+    def test_all_candidates_unusable_is_miss(self):
+        a = Node(inputs=["ありがとう"], confidence=0.9)
+        b = Node(inputs=["ありがとう"], confidence=0.8)
+        a.status = b.status = "quarantined"
+        g = self.graph(a, b)
+        _, kind, _ = g.search("ありがとう")
+        self.assertEqual(kind, "miss")
+
     def test_quarantined_node_is_treated_as_miss(self):
         n = Node(inputs=["だめな応答"], response="否定された")
         n.status = "quarantined"
