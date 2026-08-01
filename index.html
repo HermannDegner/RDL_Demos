@@ -172,6 +172,49 @@
 
     .standalone .stage { color: var(--orange); }
 
+    .integrated-feature {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 28px;
+      align-items: center;
+      padding: 28px;
+      border: 1px solid #52705b;
+      border-radius: 16px;
+      background:
+        radial-gradient(circle at 90% 0, rgba(142, 227, 177, 0.13), transparent 25rem),
+        linear-gradient(145deg, #17241f, #121a19);
+      text-decoration: none;
+      transition: transform 150ms ease, border-color 150ms ease;
+    }
+
+    .integrated-feature:hover,
+    .integrated-feature:focus-visible {
+      transform: translateY(-2px);
+      border-color: var(--green);
+      outline: none;
+    }
+
+    .integrated-feature .stage { margin-bottom: 15px; color: var(--green); }
+    .integrated-feature h3 { margin: 0; font-size: clamp(1.25rem, 3vw, 1.8rem); }
+    .integrated-feature p {
+      max-width: 760px;
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.7;
+    }
+
+    .feature-arrow {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      place-items: center;
+      border: 1px solid #4b6855;
+      border-radius: 50%;
+      color: var(--green);
+      font-size: 1.2rem;
+    }
+
     .bot-link {
       display: flex;
       gap: 18px;
@@ -201,6 +244,8 @@
       .section-head { display: block; }
       .section-note { margin-top: 8px; }
       .bot-link { align-items: flex-start; }
+      .integrated-feature { grid-template-columns: 1fr; }
+      .feature-arrow { display: none; }
     }
   </style>
 </head>
@@ -215,6 +260,21 @@
   </header>
 
   <main>
+    <section aria-labelledby="integrated-heading">
+      <div class="section-head">
+        <h2 id="integrated-heading">統合発展型</h2>
+        <p class="section-note">既存系列の因果を、一つの検証可能な更新系へ</p>
+      </div>
+      <a class="integrated-feature" href="./demos/relational-ecology-lab/">
+        <div>
+          <span class="stage">Ecology 06 · Integrated</span>
+          <h3>RDL Living Field</h3>
+          <p>知覚制約、草・水・遮蔽、能動的脅威、休眠を伴う資源転移、個体別記憶、H_vec と Leap を統合。物理環境・個体内部・観測者記録を切り分けて追跡する。</p>
+        </div>
+        <span class="feature-arrow" aria-hidden="true">↗</span>
+      </a>
+    </section>
+
     <section aria-labelledby="ecology-heading">
       <div class="section-head">
         <h2 id="ecology-heading">生態系・行動の発展系列</h2>
@@ -222,7 +282,7 @@
       </div>
 
       <div class="lineage" aria-label="生態系デモの発展順">
-        <strong>勾配世界</strong><b>→</b><span>感覚制約</span><b>→</b><span>複合資源</span><b>→</b><span>能動的脅威</span><b>→</b><span>資源転移</span>
+        <strong>勾配世界</strong><b>→</b><span>感覚制約</span><b>→</b><span>複合資源</span><b>→</b><span>能動的脅威</span><b>→</b><span>資源転移</span><b>→</b><strong>統合場</strong>
       </div>
 
       <div class="grid">

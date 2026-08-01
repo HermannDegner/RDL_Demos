@@ -14,11 +14,26 @@ RDL（関係力学言語 / Relational Dynamics Language）をベースにした�
 番号は作成順や発展順と一致しなくなっていたため、内容を表すURLへ移した。
 旧 demo0〜demo6 は互換用の転送入口として残している。
 
+### 統合発展型
+
+[RDL Living Field](demos/relational-ecology-lab/) は、既存デモで分かれていた要素を
+一つの因果ループへ統合した発展実験。
+
+- 連続座標上を動く5体のRabbitと、視覚を遮蔽される能動的脅威
+- 草・水・遮蔽と、摂取 → 枯渇 → 休眠 → 別地点再生の資源循環
+- 制限された視覚と、方向が曖昧な音
+- 個体ごとに分離された食・水・危険・移動の予測場
+- 予測差 `E` の `H_vec` への蓄積と、実効閾値を越えたときの `Leap`
+- fixed tick と seeded RNG による再現可能な実行
+
+物理環境、個体の内部予測、観測者専用メトリクスは更新経路を分離している。
+繁殖は、まずこの最小因果ループを説明可能に保つため意図的に含めていない。
+
 ### 生態系・行動の発展系列
 
 同じ対象へ条件を加え、意味と行動がどう変わるかを見る系列。
 
-> 勾配世界 → 感覚制約 → 複合資源 → 能動的脅威 → 資源転移
+> 勾配世界 → 感覚制約 → 複合資源 → 能動的脅威 → 資源転移 → 統合場
 
 | 段階 | デモ | 焦点 | 旧URL |
 |---|---|---|---|
@@ -27,6 +42,7 @@ RDL（関係力学言語 / Relational Dynamics Language）をベースにした�
 | 3 | [複合資源による生存選択](demos/ecology-multi-resource/) | 水場を加え、空腹・渇き・危険を競合させる | demo5 |
 | 4 | [能動的脅威とアンカー行動](demos/rabbit-active-threat/) | 追跡する脅威に対する退避と資源確保 | demo6 |
 | 5 | [資源枯渇と即時転移](demos/rabbit-resource-relocation/) | 資源の転移により永続的な安全地帯を崩す | demo0 |
+| 6 | [RDL Living Field](demos/relational-ecology-lab/) | 系列全体を個体別予測・H_vec・因果ログとともに統合する | 新規 |
 
 ### 探索・評価の再実装
 
@@ -71,6 +87,7 @@ RDL_Demos/
 │   ├── ecology-multi-resource/
 │   ├── rabbit-active-threat/
 │   ├── rabbit-resource-relocation/
+│   ├── relational-ecology-lab/
 │   ├── ecology-parameter-search/
 │   └── warp-navigation/
 ├── demo0/ ... demo6/       旧URLからの転送

@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    name="description"
+    content="知覚制約、複合資源、能動的脅威、個体別記憶、H_vecとLeapを統合したRDL生態系実験。"
+  />
+  <title>RDL Living Field — 統合生態系</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <nav class="topbar" aria-label="デモ内ナビゲーション">
+    <a class="brand" href="../../">
+      <span class="brand-mark" aria-hidden="true">R</span>
+      <span>RDL Demos</span>
+    </a>
+    <a class="back-link" href="../../">実験一覧へ <span aria-hidden="true">↗</span></a>
+  </nav>
+
+  <main class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Integrated experiment · Ecology 06</p>
+        <h1>RDL Living Field</h1>
+        <p class="lead">
+          見える世界、個体が予測している世界、観測者だけが知る記録を分離した統合生態系。
+          資源の枯渇や曖昧な危険が予測差を生み、H<sub>vec</sub> が閾値を越えると行動仮説が組み替わります。
+        </p>
+      </div>
+      <dl class="hero-facts">
+        <div>
+          <dt>空間</dt>
+          <dd>連続座標・閉境界</dd>
+        </div>
+        <div>
+          <dt>内部</dt>
+          <dd>個体別の予測場</dd>
+        </div>
+        <div>
+          <dt>再現性</dt>
+          <dd>Fixed tick + seed</dd>
+        </div>
+      </dl>
+    </header>
+
+    <section class="control-deck" aria-label="シミュレーション操作">
+      <div class="run-controls">
+        <button id="run-toggle" class="run-button" type="button" aria-pressed="true">
+          <span class="run-dot" aria-hidden="true"></span>
+          <span id="run-label">実行中</span>
+        </button>
+        <label class="control-field">
+          <span>速度</span>
+          <select id="speed-select">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+        </label>
+        <label class="control-field seed-field">
+          <span>Seed</span>
+          <input id="seed-input" type="number" min="1" step="1" value="2401" inputmode="numeric" />
+        </label>
+        <button id="reset-button" class="secondary-button" type="button">この seed で再構成</button>
+      </div>
+
+      <div class="view-controls">
+        <label class="control-field">
+          <span>個体</span>
+          <select id="focus-select" aria-label="観察するウサギ"></select>
+        </label>
+        <label class="control-field overlay-field">
+          <span>表示する場</span>
+          <select id="overlay-select">
+            <option value="actual">物理環境のみ</option>
+            <option value="resource">個体の食・水記憶</option>
+            <option value="danger">個体の危険記憶</option>
+            <option value="motion">個体の移動誤差</option>
+            <option value="visits">個体の探索履歴</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="lab-grid" aria-label="統合生態系シミュレーション">
+      <figure class="world-card">
+        <div class="world-heading">
+          <div>
+            <span class="section-kicker">Physical field</span>
+            <h2>関係が動く場所</h2>
+          </div>
+          <span id="field-mode" class="field-mode">観測: 物理環境</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas
+            id="world-canvas"
+            width="960"
+            height="640"
+            aria-label="ウサギ、草、水、脅威が動く生態系"
+          ></canvas>
+          <div class="canvas-hint">クリックで個体を選択</div>
+        </div>
+        <figcaption class="legend" aria-label="凡例">
+          <span><i class="legend-rabbit"></i>Rabbit</span>
+          <span><i class="legend-grass"></i>草 + 遮蔽</span>
+          <span><i class="legend-water"></i>水</span>
+          <span><i class="legend-threat"></i>能動的脅威</span>
+          <span><i class="legend-dormant"></i>休眠地点（観測者表示）</span>
+        </figcaption>
+      </figure>
+
+      <aside class="inspector" aria-labelledby="focus-heading">
+        <div class="inspector-head">
+          <div>
+            <span class="section-kicker">Agent interior</span>
+            <h2 id="focus-heading">Rabbit <span id="focus-id">1</span></h2>
+          </div>
+          <span id="focus-status" class="status-pill">alive</span>
+        </div>
+
+        <section class="decision-card" aria-labelledby="decision-heading">
+          <span id="decision-label" class="decision-label">探索</span>
+          <h3 id="decision-heading">初期知覚を構成中</h3>
+          <p id="decision-reason">最初の fixed tick で行動候補を比較します。</p>
+          <div class="prediction-line">
+            <span>予測</span>
+            <output id="prediction-values">資源 — / 危険 — / 移動 —</output>
+          </div>
+        </section>
+
+        <section class="panel-section" aria-labelledby="needs-heading">
+          <div class="panel-heading">
+            <h3 id="needs-heading">生存ニーズ</h3>
+            <span>0 安定 — 1 限界</span>
+          </div>
+          <div class="meter-list needs-list">
+            <div class="meter-row">
+              <div class="meter-label"><span>空腹</span><output id="hunger-value">0.00</output></div>
+              <div class="meter-track"><i id="hunger-bar" class="meter-fill hunger"></i></div>
+            </div>
+            <div class="meter-row">
+              <div class="meter-label"><span>渇き</span><output id="thirst-value">0.00</output></div>
+              <div class="meter-track"><i id="thirst-bar" class="meter-fill thirst"></i></div>
+            </div>
+            <div class="meter-row">
+              <div class="meter-label"><span>恐怖</span><output id="fear-value">0.00</output></div>
+              <div class="meter-track"><i id="fear-bar" class="meter-fill fear"></i></div>
+            </div>
+            <div class="meter-row">
+              <div class="meter-label"><span>疲労</span><output id="fatigue-value">0.00</output></div>
+              <div class="meter-track"><i id="fatigue-bar" class="meter-fill fatigue"></i></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-section h-section" aria-labelledby="h-heading">
+          <div class="panel-heading">
+            <h3 id="h-heading">H<sub>vec</sub> / 予測差の蓄積</h3>
+            <span>閾値 <output id="theta-value">0.00</output></span>
+          </div>
+          <div class="meter-list">
+            <div class="meter-row">
+              <div class="meter-label"><span>resource</span><output id="h-resource-value">0.00</output></div>
+              <div class="meter-track"><i id="h-resource-bar" class="meter-fill h-resource"></i></div>
+            </div>
+            <div class="meter-row">
+              <div class="meter-label"><span>danger</span><output id="h-danger-value">0.00</output></div>
+              <div class="meter-track"><i id="h-danger-bar" class="meter-fill h-danger"></i></div>
+            </div>
+            <div class="meter-row">
+              <div class="meter-label"><span>motion</span><output id="h-motion-value">0.00</output></div>
+              <div class="meter-track"><i id="h-motion-bar" class="meter-fill h-motion"></i></div>
+            </div>
+          </div>
+          <div class="xi-row">
+            <div>
+              <span class="xi-symbol">ξ</span>
+              <span>未説明圧</span>
+            </div>
+            <strong id="xi-value">0.00</strong>
+          </div>
+          <div class="reliability-row" aria-label="予測モデルの信頼度">
+            <span>信頼度</span>
+            <output id="reliability-values">資源 — · 危険 — · 移動 —</output>
+          </div>
+        </section>
+
+        <section class="panel-section event-section" aria-labelledby="event-heading">
+          <div class="panel-heading">
+            <h3 id="event-heading">個体の因果ログ</h3>
+            <span><output id="leap-count">0</output> Leaps</span>
+          </div>
+          <ol id="event-log" class="event-log" aria-live="polite">
+            <li class="empty-event">最初の意思決定を待っています。</li>
+          </ol>
+        </section>
+      </aside>
+    </section>
+
+    <section class="observer-strip" aria-labelledby="observer-heading">
+      <div class="observer-intro">
+        <span class="section-kicker">Observer only</span>
+        <h2 id="observer-heading">測定はするが、個体へは返さない</h2>
+        <p id="observer-event">エピソードを初期化しています。</p>
+      </div>
+      <dl class="metric-grid">
+        <div><dt>tick</dt><dd id="metric-tick">0</dd></div>
+        <div><dt>episode</dt><dd id="metric-episode">1</dd></div>
+        <div><dt>living</dt><dd id="metric-living">5 / 5</dd></div>
+        <div><dt>dormant</dt><dd id="metric-dormant">0</dd></div>
+        <div><dt>relocations</dt><dd id="metric-relocations">0</dd></div>
+        <div><dt>total leaps</dt><dd id="metric-leaps">0</dd></div>
+      </dl>
+    </section>
+
+    <section class="blueprint" aria-labelledby="blueprint-heading">
+      <div class="blueprint-head">
+        <span class="section-kicker">Ecosystem blueprint</span>
+        <h2 id="blueprint-heading">三つの場を混ぜない</h2>
+        <p>表示上は重ねられても、更新経路は分離されています。</p>
+      </div>
+      <div class="layer-grid">
+        <article>
+          <span class="layer-index">01</span>
+          <h3>物理環境</h3>
+          <p>連続位置、閉じた境界、資源量、遮蔽、脅威の身体。摂取と接触だけが状態を直接変えます。</p>
+          <ul>
+            <li>草 / 水 / 休眠</li>
+            <li>視線遮蔽 / 音</li>
+            <li>捕捉距離</li>
+          </ul>
+        </article>
+        <article>
+          <span class="layer-index">02</span>
+          <h3>個体の予測場</h3>
+          <p>各Rabbitが別々に持つ食・水・危険・移動記憶。見えた範囲と曖昧な音だけで更新します。</p>
+          <ul>
+            <li>候補行動の価値</li>
+            <li>E → H<sub>vec</sub> → Leap</li>
+            <li>記憶は非共有</li>
+          </ul>
+        </article>
+        <article>
+          <span class="layer-index">03</span>
+          <h3>観測者の記録</h3>
+          <p>全個体の生存数、休眠、転移、Leapを集計します。このデータは意思決定関数へ戻りません。</p>
+          <ul>
+            <li>再現可能なseed</li>
+            <li>因果イベントログ</li>
+            <li>外側の比較評価</li>
+          </ul>
+        </article>
+      </div>
+      <div class="causal-chain" aria-label="資源転移の因果順">
+        <span>摂取</span><i aria-hidden="true">→</i><span>枯渇</span><i aria-hidden="true">→</i><span>休眠</span><i aria-hidden="true">→</i><span>別地点で再生</span>
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p>RDL Living Field · reproduction is intentionally deferred until the core causal loop is inspectable.</p>
+    <p><kbd>Space</kbd> で実行 / 一時停止</p>
+  </footer>
+</body>
+</html>
