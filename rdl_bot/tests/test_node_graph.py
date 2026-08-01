@@ -118,6 +118,14 @@ class TestSearch(GraphTestCase):
         node, kind, _ = g.search("ありがとう")
         self.assertEqual(node.response, "learned")
 
+    def test_user_node_wins_over_bootstrap_seed(self):
+        """同梱seedもユーザー由来ノードに置換される（設計書 §3.7）。"""
+        seed = Node(inputs=["ありがとう"], response="seed", source="bootstrap_seed", confidence=0.5)
+        learned = Node(inputs=["ありがとう"], response="learned", source="llm_learned", confidence=0.9)
+        g = self.graph(seed, learned)
+        node, _, _ = g.search("ありがとう")
+        self.assertEqual(node.response, "learned")
+
 
 class TestStatusResolution(GraphTestCase):
     def test_quarantined_node_does_not_shadow_an_active_one(self):

@@ -35,7 +35,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
-from node_graph import NodeGraph, Node
+from node_graph import NodeGraph, Node, SEED_SOURCES
 from h_state import HState
 from llm_bridge import LLMBridge
 from sfo_profile import AI_SFO, DEFAULT_SFO_PRESET, create_sfo_profile_from_mbti
@@ -204,9 +204,10 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
     # 1. 低confidence・低使用頻度ノードのTTL減算と削除
     for n in list(graph.nodes.values()):
         n.decay_confidence()
-        # llm_seed ノードの retirement 判定 (設計書 v0.3 §3.7 Seedの取り扱い原則)
-        # ユーザー由来ノードに置換されきった llm_seed は削除候補
-        if n.source == "llm_seed" and n.confidence < 0.3 and n.usage_count == 0:
+        # seed ノードの retirement 判定 (設計書 v0.3 §3.7 Seedの取り扱い原則)
+        # ユーザー由来ノードに置換されきった seed は削除候補。
+        # 同梱の bootstrap_seed も llm_seed と同じく仮置きの足場なので対象。
+        if n.source in SEED_SOURCES and n.confidence < 0.3 and n.usage_count == 0:
             n.ttl = 0 # 即時削除対象とする
 
     if retire:
@@ -550,7 +551,20 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
 
 
 def load_seed_json(graph: NodeGraph, path: str = "data/seed_v0.1.json") -> int:
-    """グラフが空のとき手動 seed JSON を読み込む。追加数を返す。"""
+    """
+    グラフが空のとき同梱の普遍 seed JSON を読み込む。追加数を返す。
+
+    以前は source="manual" / confidence=0.9 で入れていた。設計書 §3.7 は
+    seedを「仮置きの足場であり、ユーザー由来ノードに置換される」ものと
+    定めているが、manual は内部経験の重みが最大(0.8)なので、seedを
+    読み込んだだけで人=0.07 / 概念=0.08 / 身体=0.11 と、起動直後から
+    外部LLMをほぼ信用しないAIになっていた（設計書 Phase A の
+    「LLM 70% / グラフ30%」とは逆）。
+
+    出自を bootstrap_seed に分け、内部経験の重みを llm_seed 並みに
+    抑えることで、ユーザーとの相互作用（approval_count）で初めて
+    内部経験へ変換されるようにする。
+    """
     try:
         with open(path, encoding="utf-8") as f:
             items = json.load(f)
@@ -560,8 +574,8 @@ def load_seed_json(graph: NodeGraph, path: str = "data/seed_v0.1.json") -> int:
                 rdl_type=d.get("rdl_type", "未分類"),
                 spatial_tag=d.get("spatial_tag", "概念"),
                 response=d.get("response"),
-                source="manual",
-                confidence=0.9,
+                source="bootstrap_seed",
+                confidence=0.5,
             ))
         graph.save()
         return len(items)

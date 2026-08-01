@@ -397,6 +397,51 @@ class TestMetabolize(RespondTestCase):
         self.assertEqual(xi, ["まったく無関係な話題"])
 
 
+class TestSeedLoading(RespondTestCase):
+    def test_seed_is_loaded_as_a_scaffold_not_internal_knowledge(self):
+        """
+        回帰テスト: 同梱seedを source="manual" / confidence=0.9 で入れていたため、
+        内部経験の重みが最大(0.8)になり、起動しただけで外部LLMをほとんど
+        信用しないAIになっていた（設計書 §3.7 はseedを仮置きの足場と定める）。
+        """
+        g = self.graph()
+        n = main.load_seed_json(g, "data/seed_v0.1.json")
+        self.assertGreater(n, 0)
+        for node in g.nodes.values():
+            self.assertEqual(node.source, "bootstrap_seed")
+            self.assertAlmostEqual(node.confidence, 0.5)
+
+    def test_startup_still_trusts_the_external_llm(self):
+        """幼少期（起動直後）は外部LLMを足場として使える信用度であること。"""
+        g = self.graph()
+        main.load_seed_json(g, "data/seed_v0.1.json")
+        for tag in main.DOMAIN_TAGS:
+            with self.subTest(domain=tag):
+                self.assertGreater(self.trust.trust_for(g, tag), 0.4)
+
+    def test_trust_falls_once_the_user_actually_validates_the_domain(self):
+        g = self.graph()
+        main.load_seed_json(g, "data/seed_v0.1.json")
+        before = self.trust.trust_for(g, "人")
+        for node in g.nodes.values():
+            if node.spatial_tag == "人":
+                node.approval_count = 5
+                node.usage_count = 3
+        self.assertLess(self.trust.trust_for(g, "人"), before / 2)
+
+    def test_unused_bootstrap_seed_is_retired(self):
+        g = self.graph()
+        main.load_seed_json(g, "data/seed_v0.1.json")
+        for node in g.nodes.values():
+            node.confidence = 0.2
+        main.metabolize(g, self.sfo, self.xi, HState(), retire=False)
+        self.assertTrue(all(n.ttl == 0 for n in g.nodes.values()))
+
+    def test_missing_seed_file_is_harmless(self):
+        g = self.graph()
+        self.assertEqual(main.load_seed_json(g, "data/nope.json"), 0)
+
+
 class TestSessionState(RespondTestCase):
     def test_round_trip(self):
         path = os.path.join(self.tmpdir.name, "session.json")

@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
 
+# 「教わっただけ／同梱されただけ」の仮置きノード。ユーザー由来ノードに
+# 置換され、使われないまま confidence が下がれば退場する。
+SEED_SOURCES = frozenset({"llm_seed", "bootstrap_seed"})
+
 # これ未満の類似度しか無いノードは「最近傍」とみなさない。
 # 未知入力のHを、たまたま登録順が早いだけの無関係なノードへ
 # 積み上げてしまうのを防ぐ。
@@ -197,14 +201,14 @@ class NodeGraph:
 
     def _prefer_user_node(self, candidate: Node, user_input: str, allow_substring: bool) -> Node:
         """
-        候補が llm_seed（教わっただけの足場）なら、同じ入力を持つ
+        候補がseed（教わっただけ／同梱されただけの足場）なら、同じ入力を持つ
         ユーザー由来ノードがあればそちらを優先する。
         """
-        if candidate.source != "llm_seed":
+        if candidate.source not in SEED_SOURCES:
             return candidate
         text_lower = user_input.lower()
         for node in self.nodes.values():
-            if node.id == candidate.id or node.source == "llm_seed":
+            if node.id == candidate.id or node.source in SEED_SOURCES:
                 continue
             patterns = [p.lower() for p in node.inputs]
             hit = text_lower in patterns

@@ -91,29 +91,45 @@ rdl_bot/
 ### ノードライフサイクル
 
 ```
-source: manual / llm_seed / llm_learned / graph_composed
+source: bootstrap_seed / llm_seed / llm_learned / graph_composed / manual
 phase:  M_lat（候補）→ activation_count≥3 で M_act（安定）
 status: active → quarantined（LLM off時に否定が閾値超過）
               → deprecated（LLM on時、修正ノードに置き換わった）
 ```
 
-- `manual` ノードは実使用（`touch()`）のたびにTTLが回復し、使われ続ける限り経過ターン数だけでは死滅しない
-- `llm_seed` ノードは TTL<=0 かつ低confidenceで `retire_dead_nodes()` により削除（50ターンごと）
+- 同梱の `seed_v0.1.json` は `bootstrap_seed` / confidence 0.5 で読み込まれる。設計書 §3.7 が定めるとおり
+  「仮置きの足場」であり、内部経験の重みは `llm_seed` と同じ 0.1。ユーザー承認（`approval_count`）が
+  積み重なって初めて内部経験へ変換される
+- 実使用（`touch()`）のたびにTTLが回復し、使われ続ける限り経過ターン数だけでは死滅しない
+- seed ノード（`bootstrap_seed` / `llm_seed`）は TTL<=0 かつ低confidenceで `retire_dead_nodes()` により削除（50ターンごと）
 - 毎ターン `decay_confidence()` が全ノードに走る（TTLが尽きた未使用ノードのみ実質的に減衰する）
 - `quarantined` / `deprecated` ノードは `search()` / `compose_from_graph()` の応答候補から除外される。`deprecated` ノードは `relations` 経由で後継ノードへ透過的にリダイレクトされる
 
-### leap フロー（既存ノードの修正 と 新規学習の両方をカバー）
+### leap フロー — Hの発生位置と作用先を分離する
+
+`should_leap()` が返すのは「グラフ全体で最もHが高いノード」であって、
+「今回の入力に関係するノード」ではない。この2つを混同すると、今回とは
+無関係な過去のノードの修正版が今回の返答になってしまう。そこで leap を
+`LeapDecision`（target / **scope** / cause / trigger_event_seq / trigger_input）
+として明示化し、scope で扱いを分けている。
 
 ```
-should_leap() = True（hot_nid = 最もHが高いノード）
-  ├── hot_nidが既存ノードに対応する
-  │     ├── LLM:on  → ask_for_node_revision() → 修正版ノードを新規作成し
-  │     │             旧ノードをdeprecated化、relationsで接続
-  │     └── LLM:off → 旧ノードをquarantine化（応答には使わない）
-  └── hot_nidが実ノードに対応しない（miss由来の新規パターン）
-        ├── LLM:on  → ask_for_node() → Node(source=llm_learned, phase=M_lat)
-        └── LLM:off → compose_from_graph()（近傍ノードのresponseを借用）
+should_leap() = True
+  ├── current    今回一致したノード自身が熱い
+  │                LLM:on  → ask_for_node_revision(hot_node, 現在入力)
+  │                          → 修正版を作り旧ノードをdeprecated化、応答に使う
+  │                LLM:off → 旧ノードをquarantine化（応答には使わない）
+  ├── background 今回とは無関係なノードが熱い
+  │                同上の修正を裏で行うが、**今回の応答としては返さない**。
+  │                修正プロンプトにも現在入力を渡さない（内容が汚染されるため）
+  ├── unresolved 未解決入力(PENDING_MISS_ID)の蓄積が閾値超過
+  │                今回がmissなら ask_for_node() で新規学習して消化。
+  │                LLMの成否や今回の一致有無によらず必ず減衰させる
+  └── phantom    実体の無いID（__llm__ / __crisis__、退場済みノード）→ 破棄
 ```
+
+`current` 以外では `trigger_input` が None になり、`ask_for_node_revision()`
+はプロンプトから現在入力の行ごと落とす。
 
 否定(`n`)・言い換え(`?`)の単発フィードバックは、応答内容そのものは書き換えず
 `confidence` の減衰とノードへの反例記録（`counterexamples`）に留める。
@@ -134,7 +150,7 @@ internal_experience = Σ(そのドメインのactiveノードについて
 ```
 
 `experience_weight(node)` は、ノードの出自(`source`)に応じた基礎重み
-（`llm_seed`=0.1 …「教わっただけ」/ `manual`=0.8 など）から始まり、
+（`bootstrap_seed`/`llm_seed`=0.1 …「教わっただけ」/ `manual`=0.8 など）から始まり、
 ユーザー承認（`approval_count`）が積み重なるほど1.0（自分で検証済み）に
 近づく。これにより、LLMから教わっただけの知識を大量に持っていても
 「経験豊富だからLLMを信用しなくなる」という誤判定を避けている。
@@ -142,6 +158,10 @@ internal_experience = Σ(そのドメインのactiveノードについて
 quarantined/deprecatedノードは「否定され続けている経験」なので
 internal_experienceには数えない。ドメインごとに独立して計算されるため、
 概念空間は成熟していても身体空間はまだ幼い、といった非一様な成熟が起こる。
+
+起動直後（seed 20件のみ）の信用度はおよそ 人0.43 / 概念0.46 / 身体0.55 /
+物語0.95 / 制度0.95 で、外部LLMを足場として使える範囲にある。そのドメインの
+ノードがユーザーに承認・使用されると 0.05 付近まで下がり、自力解決へ移る。
 
 信用度は「miss時の早期相談」だけでなく、部分一致した内部応答の
 confidenceがそのドメインの信用度を下回る場合にも、確率的にLLMへの
@@ -176,7 +196,16 @@ LLMは素のJSON・コードフェンス付き・散文の前置き付きのい�
 ### 既知の制限（Phase 1）
 
 - exact/partial一致自体は依然として部分文字列マッチ（表記ゆれ・同義語には弱い）
-- miss時の最近傍探索は文字N-gram（分かち書き不要）に変更済みだが、埋め込みベースの意味的類似度ではない
+- miss時の最近傍探索は文字N-gram（分かち書き不要）に変更済みだが、埋め込みベースの意味的類似度ではない。
+  類似度が `MIN_NEAREST_SIMILARITY`(0.05) 未満なら最近傍なしとし、そのmissのHは
+  `HState.PENDING_MISS_ID` へ積む（無関係なノードにHを積むと、そのノードが誤って修正・隔離される）
+- **Node が「観測・概念・関係・応答」を1つに混在させている。** `inputs`/`rdl_type`/`response` は
+  発話に対する応答テンプレートであって、ユーザーのM_B構造そのものではない。時間変化・条件・
+  内的葛藤・過去判断との反転関係などは保持できない
+- **`relations` が型なしのID列で、2つの用途に多重化されている**（意味的なW_ij と
+  deprecated→後継の履歴リンク）。`_resolve_active()` は `relations[-1]` を後継とみなすため、
+  後から意味エッジを足すと後継解決が壊れる。型付きEdge（`successor_of` / `semantically_related_to` 等）
+  への分離が必要
 - グラフ内合成（LLM:off 時）は近傍借用のみ。W_ij による本格合成は Phase 4
 - SFO・MBTI初期値・ξ pool・簡易M_Δ代謝は実装済み（`sfo_profile.py`）。SFOがノード選択自体に影響する仕組み、LLMへのノードグラフ文脈注入、W_ijの本格的な張り直しは未着手
 - `NodeGraph.merge_or_split_nodes()` は空実装、`update_relations()` も片方向にIDを足すだけ（Phase D）

@@ -102,6 +102,23 @@ class TestExperienceWeighting(TrustTestCase):
             self.trust.internal_experience(idle, "概念"),
         )
 
+    def test_bootstrap_seed_weighs_the_same_as_llm_seed(self):
+        """同梱seedもLLM由来seedも「仮置きの足場」なので内部経験は同じ重み。"""
+        bootstrap = Node(inputs=["x"], spatial_tag="概念", source="bootstrap_seed")
+        llm_seed = Node(inputs=["x"], spatial_tag="概念", source="llm_seed")
+        self.assertAlmostEqual(
+            self.trust._node_experience_weight(bootstrap),
+            self.trust._node_experience_weight(llm_seed),
+        )
+
+    def test_bootstrap_seed_weighs_far_less_than_manual(self):
+        seed = Node(inputs=["x"], spatial_tag="概念", source="bootstrap_seed")
+        manual = Node(inputs=["x"], spatial_tag="概念", source="manual")
+        self.assertLess(
+            self.trust._node_experience_weight(seed),
+            self.trust._node_experience_weight(manual),
+        )
+
     def test_unknown_source_uses_default_weight(self):
         node = Node(inputs=["x"], spatial_tag="概念", source="謎の出自")
         self.assertAlmostEqual(
