@@ -12,6 +12,7 @@ RDL個人M_B外部化AI - CLI ループ (Phase 0 + Phase A/B)
   /sfo                        AI_SFOプロファイルを表示
   /mbti <TYPE>                MBTIタイプでSFOプロファイルを再初期化
   /trust                      ドメイン別LLM信用度を表示
+  /dyn                        動態係数とその帰結を表示
   /xipool                     ξプールを表示
   /graph                      グラフ統計を表示
   /hot                        H高いノードを表示
@@ -21,6 +22,7 @@ RDL個人M_B外部化AI - CLI ループ (Phase 0 + Phase A/B)
 
 import sys
 import os
+import math
 import random
 
 # Windows での文字化け防止
@@ -35,6 +37,8 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
+import dynamics
+from dynamics import load_dynamics_config
 from node_graph import NodeGraph, Node, SEED_SOURCES
 from h_state import HState, xi_pressure
 from llm_bridge import LLMBridge
@@ -47,12 +51,13 @@ BANNER = """
   sumitsuku-AI  /  RDL Bot  v0.1
   Phase 0->A/B  CLI prototype
 ========================================
-  /llm on|off|once  /h  /sfo  /mbti  /trust  /xipool  /graph  /hot  /quit
+  /llm on|off|once  /h  /sfo  /mbti  /trust  /dyn  /xipool  /graph  /hot  /quit
   feedback: y(agree) n(deny) ?(rephrase)
 """
 
 SESSION_STATE_PATH = "data/session_state.json"
 LLM_TRUST_CONFIG_PATH = "data/llm_trust_config.json"
+DYNAMICS_CONFIG_PATH = "data/dynamics_config.json"
 DOMAIN_TAGS = ["人", "概念", "物語", "制度", "身体"]
 
 
@@ -114,6 +119,61 @@ def feedback_prompt(last_node_id: str, last_input: str, graph: NodeGraph, h: HSt
     apply_feedback(fb, last_node_id, last_input, graph, h)
 
 
+def print_dynamics(graph: NodeGraph) -> None:
+    """
+    動態係数と、その帰結を表示する。
+
+    これらの係数は Core にも借用実装層にも決定則が無く、実際に動かした
+    感触でしか決まらない（NN借用 v0.1 の残課題そのもの）。
+    「γ=0.01」だけ見ても調整できないので、半減期のような
+    解釈できる形に直して並べる。
+    """
+    cfg = dynamics.CONFIG
+    print(f"  動態係数（{DYNAMICS_CONFIG_PATH} で上書き可）:")
+    print(f"    {cfg.to_dict()}")
+
+    print("  帰結:")
+    # θ が上限に張り付くまでの leap 回数
+    if cfg.theta_raise_on_leap > 1.0 and cfg.theta_max > cfg.theta_initial:
+        n = math.ceil(math.log(cfg.theta_max / cfg.theta_initial)
+                      / math.log(cfg.theta_raise_on_leap))
+        print(f"    θ: leap {n} 回で上限 {cfg.theta_max} に到達"
+              f"（M_Δ相ごとに ×{cfg.theta_relax} で初期値へ戻る）")
+
+    # ξ圧が最大のときの θ_eff の範囲
+    lo = 1 - cfg.xi_drop_ratio - cfg.xi_jitter_ratio
+    hi = 1 - cfg.xi_drop_ratio + cfg.xi_jitter_ratio
+    print(f"    ξ: プール {cfg.xi_saturation:.0f} 件でξ圧1.0 → "
+          f"θ_eff は θ×[{lo:.2f}, {hi:.2f}] に揺れる")
+
+    # κゲートが発動する慣性
+    if 0 < cfg.kappa_hitl_threshold < 1:
+        m_b = -cfg.kappa_m0 * math.log(cfg.kappa_hitl_threshold)
+        print(f"    κ: ‖M_B‖>{m_b:.1f} で自力修正不能とみなす"
+              f"（例: confidence 1.0 なら使用 {m_b / max(cfg.inertia_usage_weight, 1e-9):.0f} 回相当）")
+
+    # 散逸の半減期
+    print("    散逸（H が半減するまでのターン数）:")
+    for label, conf, usage, appr in (
+        ("同梱seed  ", 0.5, 0, 0),
+        ("定着中    ", 0.9, 10, 0),
+        ("絶対化    ", 1.0, 30, 10),
+    ):
+        n = Node(inputs=["_"], confidence=conf)
+        n.usage_count, n.approval_count = usage, appr
+        rate = min(cfg.dissipation_cap, cfg.dissipation_gamma * n.inertia())
+        half = math.log(2) / rate if rate > 0 else float("inf")
+        print(f"      {label} ‖M_B‖={n.inertia():5.2f}  a_k={rate:.3f}  半減期={half:.0f}ターン")
+
+    # 実グラフの現状
+    if graph.nodes:
+        kappas = [n.kappa() for n in graph.nodes.values() if n.status == "active"]
+        if kappas:
+            frozen = sum(1 for k in kappas if k < cfg.kappa_hitl_threshold)
+            print(f"    現状: activeノード{len(kappas)}件  κ中央値="
+                  f"{sorted(kappas)[len(kappas) // 2]:.3f}  自力修正不能={frozen}件")
+
+
 def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_profile: AI_SFO, xi_pool: list[str], llm_trust: LLMTrust) -> bool:
     """コマンド処理。Trueなら次のループへ。"""
     parts = cmd.strip().split()
@@ -171,6 +231,9 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
             exp = llm_trust.internal_experience(graph, tag)
             print(f"    {tag}: trust={trust:.2f}  internal_experience={exp:.2f}")
 
+    elif name == "/dyn":
+        print_dynamics(graph)
+
     elif name == "/xipool":
         if not xi_pool:
             print("  ξプールは空です。")
@@ -209,7 +272,7 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
 
     # 0. 熱の散逸 dH_vec/dt の -A·H_vec 項（NN借用 v0.1 §4）。
     # 慣性の強い（M_Bの得意な）方向ほど速く冷め、弱い方向に熱が残る。
-    h_state.dissipate(graph.dissipation_rates(DISSIPATION_GAMMA, DISSIPATION_CAP))
+    h_state.dissipate(graph.dissipation_rates())
 
     # 1. 低confidence・低使用頻度ノードのTTL減算と削除
     for n in list(graph.nodes.values()):
@@ -318,18 +381,6 @@ class LeapDecision:
     trigger_input: Optional[str] = None
 
 
-# 整合側の微小更新の基準レート（Core §6.1）。
-# exact は V_B に完全に沿った使用、partial は部分的に沿った使用。
-ALIGN_RATE_EXACT = 0.04
-ALIGN_RATE_PARTIAL = 0.02
-
-# これ未満の κ は「自力では修正できない」領域とみなし、ユーザーに判断を促す。
-KAPPA_HITL_THRESHOLD = 0.15
-
-# 散逸行列 A の係数。a_k = γ·λ_k を cap で頭打ちにする（NN借用 v0.1 §4）。
-DISSIPATION_GAMMA = 0.01
-DISSIPATION_CAP = 0.15
-
 
 def _reinforce_along_v_b(node: Node, h: HState, pressure: float, base_rate: float) -> None:
     """
@@ -362,7 +413,7 @@ def _warn_if_self_correction_is_lost(node: Node) -> None:
     「確信が固まっている時こそレビューが要る」を構造から出す。
     """
     kappa = node.kappa()
-    if kappa < KAPPA_HITL_THRESHOLD:
+    if kappa < dynamics.CONFIG.kappa_hitl_threshold:
         print(f"  [κ={kappa:.3f} — この応答は慣性が固まっており自力で修正できません。"
               f"誤っていれば n で否定してください]")
 
@@ -507,12 +558,12 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
         h.on_exact(node.id)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
-        _reinforce_along_v_b(node, h, pressure, ALIGN_RATE_EXACT)
+        _reinforce_along_v_b(node, h, pressure, dynamics.CONFIG.align_rate_exact)
     elif match_type == "partial":
         h.on_partial(node.id)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
-        _reinforce_along_v_b(node, h, pressure, ALIGN_RATE_PARTIAL)
+        _reinforce_along_v_b(node, h, pressure, dynamics.CONFIG.align_rate_partial)
 
         # 内部応答とLLM信用度の裁定：低confidenceの部分一致は、
         # そのドメインの信用度が上回っているならLLMに譲ったほうがよい
@@ -727,6 +778,7 @@ def main():
         llm.set_mode(saved_llm_mode if saved_llm_mode in ("on", "off", "on-once") else "on")
 
     llm_trust = LLMTrust(load_llm_trust_config(LLM_TRUST_CONFIG_PATH))
+    dynamics.configure(load_dynamics_config(DYNAMICS_CONFIG_PATH))
 
     print(BANNER)
 

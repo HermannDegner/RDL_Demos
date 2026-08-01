@@ -42,6 +42,7 @@ APIキー不要。LLM呼び出しは行わず、検索・H蓄積・leap分岐・
 | `/sfo` | 現在のAI_SFOプロファイルを表示 |
 | `/mbti <TYPE>` | MBTIタイプまたは `RDL_native_*` プリセットでSFOプロファイルを再初期化（例: `/mbti INTP`、`/mbti RDL_native_trickster`。大文字小文字は問わない） |
 | `/trust` | ドメイン（spatial_tag）別のLLM信用度と設定値を表示 |
+| `/dyn` | 動態係数（θ・ξ・κ・散逸）とその帰結を表示 |
 | `/xipool` | ξプールの内容を表示 |
 | `/graph` | グラフ統計（総ノード数・source別・phase別・status別） |
 | `/hot` | H値が高いノードTOP3 |
@@ -60,13 +61,15 @@ rdl_bot/
 ├── llm_bridge.py    LLMBridge（Anthropic API・ξポンプ）
 ├── sfo_profile.py   AI_SFO（空間流向診断プロファイル・MBTI変換・drift機構）
 ├── llm_trust.py     LLMTrust（ドメイン別LLM信用度モデル）
+├── dynamics.py      DynamicsConfig（動態係数の一元管理・外部設定）
 ├── requirements.txt
 ├── tests/           単体テスト（stdlibのunittestのみ・追加依存なし）
 └── data/
     ├── seed_v0.1.json         手動 Phase 0 ノード（20件・APIキー不要）
     ├── graph.json             実行時に生成・更新される学習グラフ
     ├── session_state.json     H_pre/H_post・SFO drift・ξプール・LLMモードの永続化
-    └── llm_trust_config.json  （任意）LLM信用度の初期変数を上書きする設定ファイル
+    ├── llm_trust_config.json  （任意）LLM信用度の初期変数を上書きする設定ファイル
+    └── dynamics_config.json   （任意）動態係数を上書きする設定ファイル
 ```
 
 ---
@@ -108,6 +111,42 @@ a_k         = min(cap, γ × ‖M_B‖)          散逸行列 A の対角成分
   しか H が下がらず、この指向性が生まれなかった
 - **関係保存則は逆算観測のみ** — `/h` が `‖M_B‖ · D[ξ] = 𝒦` を表示する。Core §4.2 のとおり
   𝒦 は直接観測できないので積として逆算するだけで、制御には使わない
+
+### 動態係数は実際に動かして決める
+
+`γ`・`M_0`・`ξ飽和件数`・整合レートなどには **Core にも借用実装層にも決定則が無い**
+（NN借用 v0.1 の残課題「η・λ・α・β・γ・M_0 の具体的な決定則」がまさにこれ）。
+同梱の値は暫定で、運用の感触でしか決まらない。
+
+そのため係数はコードに散らさず `dynamics.py` の `DynamicsConfig` に集約してあり、
+`data/dynamics_config.json` を置けば**変えたいキーだけ**上書きできる。
+
+```json
+{ "dissipation_gamma": 0.05, "kappa_m0": 2.0 }
+```
+
+`/dyn` は係数そのものに加えて**その帰結**を表示する。`γ=0.01` だけ見ても調整できないので、
+半減期など解釈できる形に直してある。
+
+```
+θ: leap 19 回で上限 5.0 に到達（M_Δ相ごとに ×0.97 で初期値へ戻る）
+ξ: プール 10 件でξ圧1.0 → θ_eff は θ×[0.65, 0.85] に揺れる
+κ: ‖M_B‖>3.8 で自力修正不能とみなす（例: confidence 1.0 なら使用 13 回相当）
+散逸（H が半減するまでのターン数）:
+  同梱seed   ‖M_B‖= 0.50  a_k=0.025  半減期=28ターン
+  定着中     ‖M_B‖= 3.60  a_k=0.150  半減期=5ターン
+現状: activeノード20件  κ中央値=0.779  自力修正不能=0件
+```
+
+調整の目安：
+
+| 症状 | 触る係数 |
+|---|---|
+| 熱が冷めすぎて leap が起きない | `dissipation_gamma` を下げる |
+| 些細な否定で leap しすぎる | `dissipation_gamma` を上げる / `theta_initial` を上げる |
+| すぐ「自力修正不能」になる | `kappa_m0` を上げる / `inertia_usage_weight` を下げる |
+| いつまでも確信が固まらない | `align_rate_exact` を上げる / `alignment_ceiling` を上げる |
+| ξ が溜まっても再編が起きない | `xi_drop_ratio` を上げる / `xi_saturation` を下げる |
 
 ### ノードライフサイクル
 

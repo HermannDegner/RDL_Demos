@@ -3,7 +3,8 @@
 import random
 import unittest
 
-from h_state import HState, XI_SATURATION, xi_pressure
+import dynamics
+from h_state import HState, xi_pressure
 
 
 class TestXiPressure(unittest.TestCase):
@@ -14,7 +15,7 @@ class TestXiPressure(unittest.TestCase):
         self.assertLess(xi_pressure(["a"]), xi_pressure(["a", "b", "c"]))
 
     def test_pressure_saturates_at_one(self):
-        self.assertEqual(xi_pressure(["x"] * int(XI_SATURATION * 5)), 1.0)
+        self.assertEqual(xi_pressure(["x"] * int(dynamics.CONFIG.xi_saturation * 5)), 1.0)
 
     def test_zero_saturation_is_harmless(self):
         self.assertEqual(xi_pressure(["a"], saturation=0), 0.0)

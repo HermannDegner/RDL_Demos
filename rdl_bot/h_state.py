@@ -4,21 +4,19 @@ H_vec 管理: 誤差蓄積の観測
 """
 
 import random
+import dynamics
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from typing import Dict, List, Optional, Sized
 
 
-# ξ圧の飽和件数。ξプールがこの件数に達すると圧は最大(1.0)になる。
-XI_SATURATION = 10.0
-
-
-def xi_pressure(xi_pool: Sized, saturation: float = XI_SATURATION) -> float:
+def xi_pressure(xi_pool: Sized, saturation: Optional[float] = None) -> float:
     """
     ξプールの滞留量を 0〜1 の「ξ圧」に正規化する。
     ノード化できずに残っている入力が多いほど、現在のM_Bが世界を
     捉えきれていないことを意味する。
     """
+    saturation = dynamics.resolve(saturation, "xi_saturation")
     if saturation <= 0:
         return 0.0
     return min(1.0, len(xi_pool) / saturation)
@@ -40,11 +38,8 @@ class HState:
     # （leapすると新規ノード学習になる）。
     PENDING_MISS_ID = "__unresolved__"
 
-    # g(ξ) の係数。θ に対する比率で持つことで θ のスケールに依存しない。
-    XI_DROP_RATIO = 0.25    # ξ圧が最大のとき θ を 25% 下げる（再編圧）
-    XI_JITTER_RATIO = 0.10  # ξ圧が最大のとき境界が ±10% 揺れる
-
-    def __init__(self, theta: float = 2.0, rng: Optional[random.Random] = None):
+    def __init__(self, theta: Optional[float] = None, rng: Optional[random.Random] = None):
+        theta = dynamics.resolve(theta, "theta_initial")
         self.H_pre: dict[str, float] = {}   # 入力時のノードミスH（軽い）
         self.H_post: dict[str, float] = {}  # 応答後のユーザー反応H（重い）
         self.theta = theta
@@ -106,8 +101,9 @@ class HState:
         """
         if pressure <= 0:
             return 0.0
-        systematic = -self.XI_DROP_RATIO * pressure
-        stochastic = self._rng.uniform(-1.0, 1.0) * self.XI_JITTER_RATIO * pressure
+        cfg = dynamics.CONFIG
+        systematic = -cfg.xi_drop_ratio * pressure
+        stochastic = self._rng.uniform(-1.0, 1.0) * cfg.xi_jitter_ratio * pressure
         return self.theta * (systematic + stochastic)
 
     def theta_eff(self, pressure: float = 0.0) -> float:
@@ -140,7 +136,8 @@ class HState:
         # H_pre/H_post 両方を弱める（再編成された領域全体を鎮める）。
         self.H_pre[node_id] = self.H_pre.get(node_id, 0) * 0.3
         self.H_post[node_id] = self.H_post.get(node_id, 0) * 0.3
-        self.theta = min(self.theta * 1.05, 5.0)
+        cfg = dynamics.CONFIG
+        self.theta = min(self.theta * cfg.theta_raise_on_leap, cfg.theta_max)
 
     def dissipate(self, rates: Dict[str, float]) -> None:
         """
@@ -161,7 +158,7 @@ class HState:
             if nid in self.H_post:
                 self.H_post[nid] *= factor
 
-    def relax_theta(self, factor: float = 0.97):
+    def relax_theta(self, factor: Optional[float] = None):
         """
         θを初期値へ向けてゆっくり戻す（M_Δ相から呼ばれる）。
 
@@ -171,6 +168,7 @@ class HState:
         期間には緩んで再び反応できるようになる必要がある。
         theta_base を下限とし、それ以下には緩まない。
         """
+        factor = dynamics.resolve(factor, "theta_relax")
         self.theta = max(self.theta * factor, self.theta_base)
 
     def forget(self, node_id: str):
@@ -283,10 +281,10 @@ class HState:
 
     @classmethod
     def from_dict(cls, data: dict) -> "HState":
-        h = cls(theta=data.get("theta", 2.0))
+        h = cls(theta=data.get("theta"))
         # theta_base 未保存の旧セッションでは、既に上がりきったthetaを
         # 下限として固定してしまわないよう既定値2.0に戻す。
-        h.theta_base = data.get("theta_base", 2.0)
+        h.theta_base = data.get("theta_base", dynamics.CONFIG.theta_initial)
         h.H_pre = data.get("H_pre", {})
         h.H_post = data.get("H_post", {})
         h.history = [HistoryEntry(**e) for e in data.get("history", [])]

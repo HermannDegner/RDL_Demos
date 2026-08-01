@@ -2,6 +2,7 @@ import json
 import math
 import uuid
 import os
+import dynamics
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
@@ -10,19 +11,6 @@ from typing import Optional, List, Dict, Tuple
 # 「教わっただけ／同梱されただけ」の仮置きノード。ユーザー由来ノードに
 # 置換され、使われないまま confidence が下がれば退場する。
 SEED_SOURCES = frozenset({"llm_seed", "bootstrap_seed"})
-
-# 整合（使われ続けること）だけで到達できる confidence の上限。
-# ここを 1.0 にすると、検証されていないノードが承認済みノードと
-# 見分けがつかなくなる。1.0 は明示的な同意(y)でのみ到達する。
-ALIGNMENT_CEILING = 0.9
-
-# 局所 ‖M_B‖ の構成。confidence（Λ相当）を基礎に、実際に使われ承認された
-# 分だけ慣性が強くなる。
-INERTIA_USAGE_WEIGHT = 0.3
-INERTIA_APPROVAL_WEIGHT = 0.5
-
-# κ(M_B) = exp(-‖M_B‖ / M_0) の基準慣性スケール（NN借用 v0.1 §5）。
-KAPPA_M0 = 5.0
 
 # これ未満の類似度しか無いノードは「最近傍」とみなさない。
 # 未知入力のHを、たまたま登録順が早いだけの無関係なノードへ
@@ -104,13 +92,14 @@ class Node:
         使用と承認は上限を持たないので ‖M_B‖ は発散しうるが、それは
         「絶対化した構造」に対応する正しい挙動（κ → 0 になる）。
         """
+        cfg = dynamics.CONFIG
         return self.confidence * (
             1.0
-            + INERTIA_USAGE_WEIGHT * self.usage_count
-            + INERTIA_APPROVAL_WEIGHT * self.approval_count
+            + cfg.inertia_usage_weight * self.usage_count
+            + cfg.inertia_approval_weight * self.approval_count
         )
 
-    def kappa(self, m_0: float = KAPPA_M0) -> float:
+    def kappa(self, m_0: Optional[float] = None) -> float:
         """
         自己修正可能性 κ(M_B) = exp(-‖M_B‖ / M_0)（NN借用 v0.1 §5）。
 
@@ -121,11 +110,12 @@ class Node:
         自動更新ではなくユーザーの判断を仰ぐべき箇所になる
         （LangGraph借用 v0.1 §6 の κ ゲート）。
         """
+        m_0 = dynamics.resolve(m_0, "kappa_m0")
         if m_0 <= 0:
             return 0.0
         return math.exp(-self.inertia() / m_0)
 
-    def reinforce(self, rate: float, ceiling: float = ALIGNMENT_CEILING):
+    def reinforce(self, rate: float, ceiling: Optional[float] = None):
         """
         Core §6.1 の整合側の微小更新（dM_B/dt が V_B に沿って動く分）。
 
@@ -137,6 +127,7 @@ class Node:
         ユーザー承認(approval_count)による検証と区別がつかなくなる。
         1.0 に到達できるのは明示的な同意(y)だけ。
         """
+        ceiling = dynamics.resolve(ceiling, "alignment_ceiling")
         if rate <= 0 or self.confidence >= ceiling:
             return
         self.confidence += rate * (ceiling - self.confidence)
@@ -379,7 +370,8 @@ class NodeGraph:
         squares = sum(n.inertia() ** 2 for n in self.nodes.values() if n.status == "active")
         return math.sqrt(squares)
 
-    def dissipation_rates(self, gamma: float, cap: float) -> Dict[str, float]:
+    def dissipation_rates(self, gamma: Optional[float] = None,
+                          cap: Optional[float] = None) -> Dict[str, float]:
         """
         散逸行列 A の対角成分 a_k = γ·λ_k（NN借用 v0.1 §4）。
 
@@ -387,6 +379,8 @@ class NodeGraph:
         速く逃がし、弱いノードには熱が残る。固有分解を持たないため、
         固有値 λ_k の代理として各ノードの局所慣性を使う。
         """
+        gamma = dynamics.resolve(gamma, "dissipation_gamma")
+        cap = dynamics.resolve(cap, "dissipation_cap")
         return {
             nid: min(cap, gamma * node.inertia())
             for nid, node in self.nodes.items()

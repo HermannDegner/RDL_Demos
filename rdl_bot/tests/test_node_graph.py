@@ -5,7 +5,8 @@ import os
 import tempfile
 import unittest
 
-from node_graph import ALIGNMENT_CEILING, Node, NodeGraph, _char_ngrams, _ngram_similarity
+import dynamics
+from node_graph import Node, NodeGraph, _char_ngrams, _ngram_similarity
 
 
 class GraphTestCase(unittest.TestCase):
@@ -292,8 +293,8 @@ class TestLifecycle(GraphTestCase):
         n = Node(inputs=["x"], confidence=0.5)
         for _ in range(500):
             n.reinforce(0.04)
-        self.assertLessEqual(n.confidence, ALIGNMENT_CEILING)
-        self.assertAlmostEqual(n.confidence, ALIGNMENT_CEILING, places=3)
+        self.assertLessEqual(n.confidence, dynamics.CONFIG.alignment_ceiling)
+        self.assertAlmostEqual(n.confidence, dynamics.CONFIG.alignment_ceiling, places=3)
 
     def test_reinforce_is_monotonic_and_small(self):
         n = Node(inputs=["x"], confidence=0.5)
