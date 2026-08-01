@@ -3,86 +3,307 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RDL Demos</title>
+  <meta name="description" content="RDL（関係力学言語）のブラウザ実験デモ集" />
+  <title>RDL Demos — 実験系列</title>
   <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d14;
+      --panel: #141827;
+      --panel-hover: #1a2136;
+      --line: #303852;
+      --text: #eef0f7;
+      --muted: #a8aec2;
+      --violet: #c8a7ff;
+      --blue: #87c7ff;
+      --green: #8ee3b1;
+      --orange: #f0bd7c;
+    }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      font-family: sans-serif;
-      background: #1a1a2e;
-      color: #eee;
-      padding: 40px 20px;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 50% -20%, #273253 0, transparent 42rem),
+        var(--bg);
+      color: var(--text);
     }
+
+    a { color: inherit; }
+
+    header,
+    main,
+    footer {
+      width: min(1060px, calc(100% - 32px));
+      margin-inline: auto;
+    }
+
+    header {
+      padding: 68px 0 42px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--violet);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
     h1 {
-      text-align: center;
-      font-size: 2rem;
-      margin-bottom: 40px;
-      color: #e0aaff;
+      margin: 0;
+      font-size: clamp(2.3rem, 8vw, 5rem);
+      line-height: 0.95;
+      letter-spacing: -0.055em;
     }
+
+    .lead {
+      max-width: 720px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.8;
+    }
+
+    main { padding: 46px 0 72px; }
+
+    section + section { margin-top: 62px; }
+
+    .section-head {
+      display: flex;
+      gap: 20px;
+      align-items: end;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 1.3rem;
+      letter-spacing: 0.015em;
+    }
+
+    .section-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .lineage {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      overflow-x: auto;
+      margin-bottom: 18px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+
+    .lineage strong { color: var(--green); }
+    .lineage b { color: #606b89; }
+
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-      gap: 20px;
-      max-width: 900px;
-      margin: 0 auto;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 14px;
     }
-    a.card {
-      display: block;
-      background: #16213e;
-      border: 1px solid #e0aaff44;
-      border-radius: 10px;
-      padding: 24px 20px;
+
+    .card {
+      display: flex;
+      min-height: 190px;
+      flex-direction: column;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(145deg, #171c2c, var(--panel));
       text-decoration: none;
-      color: #eee;
-      transition: background 0.2s, border-color 0.2s;
+      transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
     }
-    a.card:hover {
-      background: #0f3460;
-      border-color: #e0aaff;
+
+    .card:hover,
+    .card:focus-visible {
+      transform: translateY(-2px);
+      border-color: var(--violet);
+      background: var(--panel-hover);
+      outline: none;
     }
-    a.card .title {
-      font-size: 1.1rem;
-      font-weight: bold;
-      margin-bottom: 8px;
-      color: #c77dff;
+
+    .stage {
+      align-self: flex-start;
+      margin-bottom: 30px;
+      padding: 3px 8px;
+      border: 1px solid #546183;
+      border-radius: 999px;
+      color: var(--blue);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
-    a.card .desc {
-      font-size: 0.85rem;
-      color: #aaa;
+
+    .card h3 {
+      margin: 0;
+      font-size: 1.05rem;
+      line-height: 1.35;
+    }
+
+    .card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.65;
+    }
+
+    .card .version {
+      margin-top: auto;
+      padding-top: 20px;
+      color: #77809b;
+      font-size: 0.7rem;
+    }
+
+    .standalone .stage { color: var(--orange); }
+
+    .bot-link {
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #111522;
+      text-decoration: none;
+    }
+
+    .bot-link:hover { border-color: var(--violet); }
+    .bot-link strong { display: block; margin-bottom: 5px; }
+    .bot-link span { color: var(--muted); font-size: 0.82rem; }
+    .bot-link i { color: var(--violet); font-style: normal; }
+
+    footer {
+      padding: 24px 0 34px;
+      border-top: 1px solid var(--line);
+      color: #747c95;
+      font-size: 0.75rem;
+    }
+
+    @media (max-width: 640px) {
+      header { padding-top: 48px; }
+      .section-head { display: block; }
+      .section-note { margin-top: 8px; }
+      .bot-link { align-items: flex-start; }
     }
   </style>
 </head>
 <body>
-  <h1>RDL Demos</h1>
-  <div class="grid">
-    <a class="card" href="./demo0/">
-      <div class="title">Demo 0</div>
-      <div class="desc">p5.js sketch（温度制御）</div>
-    </a>
-    <a class="card" href="./demo1/">
-      <div class="title">Demo 1</div>
-      <div class="desc">RDF v4 近傍セル評価移動</div>
-    </a>
-    <a class="card" href="./demo2/">
-      <div class="title">Demo 2</div>
-      <div class="desc">Non-Euclidean Warp Navigation — 迷路内熱場・フロー学習</div>
-    </a>
-    <a class="card" href="./demo3/">
-      <div class="title">Demo 3</div>
-      <div class="desc">RDF minimal world ver2 — 草・捕食者・被食者</div>
-    </a>
-    <a class="card" href="./demo4/">
-      <div class="title">Demo 4</div>
-      <div class="desc">RDF minimal world ver2.1 — 少数戦術・視覚/音センサー</div>
-    </a>
-    <a class="card" href="./demo5/">
-      <div class="title">Demo 5</div>
-      <div class="desc">RDF minimal world ver3 — 水場追加・複合生存資源</div>
-    </a>
-    <a class="card" href="./demo6/">
-      <div class="title">Demo 6</div>
-      <div class="desc">RDF Rabbit Demo v3.1 — アクティブ脅威・アンカー行動</div>
-    </a>
-  </div>
+  <header>
+    <p class="eyebrow">Relational Dynamics Language</p>
+    <h1>RDL Demos</h1>
+    <p class="lead">
+      関係、勾配、誤差、再編が、運動としてどう現れるかを見る実験集です。
+      番号ではなく、各デモの役割と発展関係に沿って並べています。
+    </p>
+  </header>
+
+  <main>
+    <section aria-labelledby="ecology-heading">
+      <div class="section-head">
+        <h2 id="ecology-heading">生態系・行動の発展系列</h2>
+        <p class="section-note">同じ対象へ条件を加え、意味の変化を追う系列</p>
+      </div>
+
+      <div class="lineage" aria-label="生態系デモの発展順">
+        <strong>勾配世界</strong><b>→</b><span>感覚制約</span><b>→</b><span>複合資源</span><b>→</b><span>能動的脅威</span><b>→</b><span>資源転移</span>
+      </div>
+
+      <div class="grid">
+        <a class="card" href="./demos/ecology-gradient-world/">
+          <span class="stage">Ecology 01</span>
+          <h3>勾配で動く最小生態系</h3>
+          <p>草・捕食者・被食者。同じ草が、食料にも隠れ場にもなる。</p>
+          <span class="version">RDF minimal world ver2 · 旧 demo3</span>
+        </a>
+
+        <a class="card" href="./demos/ecology-limited-senses/">
+          <span class="stage">Ecology 02</span>
+          <h3>感覚が制約された少数戦術</h3>
+          <p>視覚と音を分離し、遮蔽と警戒が行動選択を変える。</p>
+          <span class="version">RDF minimal world ver2.1 · 旧 demo4</span>
+        </a>
+
+        <a class="card" href="./demos/ecology-multi-resource/">
+          <span class="stage">Ecology 03</span>
+          <h3>複合資源による生存選択</h3>
+          <p>水場を加え、空腹・渇き・危険の勾配を競合させる。</p>
+          <span class="version">RDF minimal world ver3 · 旧 demo5</span>
+        </a>
+
+        <a class="card" href="./demos/rabbit-active-threat/">
+          <span class="stage">Ecology 04</span>
+          <h3>能動的脅威とアンカー行動</h3>
+          <p>追跡する脅威に対し、5羽のウサギが退避と資源確保を両立する。</p>
+          <span class="version">RDF Rabbit Demo v3.1 · 旧 demo6</span>
+        </a>
+
+        <a class="card" href="./demos/rabbit-resource-relocation/">
+          <span class="stage">Ecology 05</span>
+          <h3>資源枯渇と即時転移</h3>
+          <p>草と水が枯渇後に場所を変え、永続的な安全地帯を崩す。</p>
+          <span class="version">RDF Rabbit Demo v4.1 · 旧 demo0</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="standalone" aria-labelledby="analysis-heading">
+      <div class="section-head">
+        <h2 id="analysis-heading">探索・評価の再実装</h2>
+        <p class="section-note">生態系系列を、探索可能な格子モデルとして組み直す</p>
+      </div>
+      <div class="grid">
+        <a class="card" href="./demos/ecology-parameter-search/">
+          <span class="stage">Experiment A</span>
+          <h3>近傍セル評価とパラメータ探索</h3>
+          <p>81条件を比較し、生存・介入・脱出から実行パラメータを選ぶ。</p>
+          <span class="version">RDF v4 整理版 · 旧 demo1</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="standalone" aria-labelledby="field-heading">
+      <div class="section-head">
+        <h2 id="field-heading">場と経路の学習</h2>
+        <p class="section-note">生態系とは独立した、H_vecとフロー場の実験</p>
+      </div>
+      <div class="grid">
+        <a class="card" href="./demos/warp-navigation/">
+          <span class="stage">Experiment B</span>
+          <h3>Non-Euclidean Warp Navigation</h3>
+          <p>迷路内の失敗を熱と方向として残し、流れ場から経路を学ぶ。</p>
+          <span class="version">Field navigation · 旧 demo2</span>
+        </a>
+      </div>
+    </section>
+
+    <section aria-labelledby="bot-heading">
+      <div class="section-head">
+        <h2 id="bot-heading">CLI実装</h2>
+      </div>
+      <a class="bot-link" href="https://github.com/HermannDegner/RDL_Demos/tree/main/rdl_bot">
+        <span><strong>rdl_bot — 個人M_B外部化AI</strong>H蓄積、leap、LLM信用度、ノード学習を扱うCLI実装</span>
+        <i>README →</i>
+      </a>
+    </section>
+  </main>
+
+  <footer>RDL Demos — experiments in relations, gradients and structural change.</footer>
 </body>
 </html>

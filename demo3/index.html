@@ -3,22 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RDF minimal world ver2</title>
+  <meta http-equiv="refresh" content="0; url=../demos/ecology-gradient-world/" />
+  <link rel="canonical" href="../demos/ecology-gradient-world/" />
+  <title>勾配で動く最小生態系へ移動しました</title>
+  <script>
+    window.location.replace("../demos/ecology-gradient-world/" + window.location.search + window.location.hash);
+  </script>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0c0e12; }
-    #back {
-      position: fixed; top: 10px; right: 10px; z-index: 999;
-      background: #1a1a2ecc; color: #e0aaff; border: 1px solid #e0aaff;
-      padding: 6px 12px; border-radius: 6px; cursor: pointer;
-      font-size: 0.85rem; text-decoration: none;
+    body {
+      display: grid; min-height: 100vh; margin: 0; place-items: center;
+      font-family: system-ui, sans-serif; background: #0b0d14; color: #eef0f7;
     }
-    #back:hover { background: #0f3460; }
+    main { max-width: 32rem; padding: 2rem; text-align: center; }
+    a { color: #c8a7ff; }
   </style>
 </head>
 <body>
-  <a id="back" href="../index.html">← 一覧へ戻る</a>
-  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.3/lib/p5.min.js"></script>
-  <script src="./sketch.js"></script>
+  <main>
+    <p>このデモは、内容を表す新しいURLへ移動しました。</p>
+    <p><a href="../demos/ecology-gradient-world/">勾配で動く最小生態系を開く</a></p>
+  </main>
 </body>
 </html>
