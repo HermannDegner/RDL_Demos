@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+# rdl_bot の実行時状態。ユーザーとの会話に由来する内容を含むため共有しない。
+rdl_bot/data/session_state.json
+rdl_bot/data/*.tmp
+rdl_bot/data/*.corrupt

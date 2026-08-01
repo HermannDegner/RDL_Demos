@@ -1,6 +1,6 @@
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict, fields
 from typing import List, Dict, Optional
 import random
 
@@ -21,11 +21,19 @@ class AI_SFO:
     drift_factor: float = 0.0  # 0.0〜1.0、初期値からの乖離度
 
     def to_dict(self):
-        return self.__dict__
+        # self.__dict__ をそのまま返すと呼び出し側が受け取ったdictを
+        # 書き換えたときにプロファイル本体（得意操作などのlist）まで
+        # 変わってしまう。asdict() は再帰的にコピーを作る。
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict):
-        return cls(**data)
+        # session_state.json はバージョンをまたいで残るため、
+        # 未知のキーが混ざっていても TypeError で起動不能にならないよう
+        # 既知フィールドだけを拾う（欠けているキーは既定値が使われる）。
+        known_fields = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
 
     def update_drift(self, user_feedback: Dict[str, float]):
         """
@@ -151,7 +159,9 @@ MBTI_TO_SFO_MAP = {
         "attention_mode": "TPN", "initial_fingerprint": "ENFJ"
     },
     "ISTP": {
-        "main_foreground_space": ["身体", "物理"], "hierarchy_bias": "物理",
+        # 「物理」は hierarchy_bias 側の値であって空間名ではないため、
+        # main_foreground_space からは除く（Ti主機能＝概念、Se補助＝身体）。
+        "main_foreground_space": ["身体", "概念"], "hierarchy_bias": "物理",
         "得意操作": ["壊す", "変える"], "苦手操作": ["守る", "作る"],
         "attention_mode": "SN", "initial_fingerprint": "ISTP"
     },
@@ -192,14 +202,24 @@ MBTI_TO_SFO_MAP = {
     },
 }
 
+DEFAULT_SFO_PRESET = "RDL_native_observer"
+
+# 表のキーは "INTP" と "RDL_native_observer" が混在しているため、
+# 大文字化した引数では RDL_native_* を一つも引けなかった
+# （/mbti RDL_native_trickster が常に既定へフォールバックしていた）。
+_SFO_PRESET_KEYS = {key.lower(): key for key in MBTI_TO_SFO_MAP}
+
+
 def create_sfo_profile_from_mbti(mbti_type: str) -> AI_SFO:
     """
-    MBTIタイプに基づいてAI_SFOプロファイルを生成する。
+    MBTIタイプ名（またはRDL_native_*プリセット名）からAI_SFOプロファイルを生成する。
+    大文字小文字は問わない。
     """
-    profile_data = MBTI_TO_SFO_MAP.get(mbti_type.upper())
+    key = _SFO_PRESET_KEYS.get(mbti_type.strip().lower())
+    profile_data = MBTI_TO_SFO_MAP.get(key) if key else None
     if not profile_data:
-        print(f"[WARN] Unknown MBTI type: {mbti_type}. Using default RDL_native_observer.")
-        profile_data = MBTI_TO_SFO_MAP["RDL_native_observer"]
+        print(f"[WARN] Unknown MBTI type: {mbti_type}. Using default {DEFAULT_SFO_PRESET}.")
+        profile_data = MBTI_TO_SFO_MAP[DEFAULT_SFO_PRESET]
     # MBTI_TO_SFO_MAP のリスト値をそのまま渡すと、生成したAI_SFOが
     # モジュール定数のlistを共有してしまい、update_drift()の破壊的更新で
     # グローバルなテーブル自体が汚染される。deepcopyして独立させる。
