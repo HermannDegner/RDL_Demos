@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from node_graph import NodeGraph, Node, SEED_SOURCES
-from h_state import HState
+from h_state import HState, xi_pressure
 from llm_bridge import LLMBridge
 from sfo_profile import AI_SFO, DEFAULT_SFO_PRESET, create_sfo_profile_from_mbti
 from llm_trust import LLMTrust, LLMTrustConfig
@@ -138,7 +138,7 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
                 print("  on / off / once を指定してください")
 
     elif name == "/h":
-        print(f"  {h.summary()}")
+        print(f"  {h.summary(xi_pressure(xi_pool))}")
 
     elif name == "/sfo":
         print(f"  AI_SFOプロファイル: {sfo_profile.to_dict()}")
@@ -308,8 +308,32 @@ class LeapDecision:
     trigger_input: Optional[str] = None
 
 
+# 整合側の微小更新の基準レート（Core §6.1）。
+# exact は V_B に完全に沿った使用、partial は部分的に沿った使用。
+ALIGN_RATE_EXACT = 0.04
+ALIGN_RATE_PARTIAL = 0.02
+
+
+def _reinforce_along_v_b(node: Node, h: HState, pressure: float, base_rate: float) -> None:
+    """
+    整合領域（H < θ_eff）における dM_B/dt を適用する（Core §6.1）。
+
+    更新量は θ_eff への近さで連続的に減衰させる。H が 0 なら満額、
+    θ_eff に近づくほど 0 に漸近し、超えれば跳躍側（_correct_node）へ移る。
+    これにより整合と跳躍が「同じ量 H に対する連続な応答」になり、
+    Core §6.3 の同一性に一歩近づく。以前は整合側の dM_B/dt が
+    そもそも存在せず（touch と usage_count だけ）、H閾値を境に
+    「何も起きない」から「全面再編」へ不連続に飛んでいた。
+    """
+    theta_eff = h.theta_eff(pressure)
+    if theta_eff <= 0:
+        return
+    slack = max(0.0, 1.0 - h.merged_h(node.id) / theta_eff)
+    node.reinforce(base_rate * slack)
+
+
 def _decide_leap(h: HState, graph: NodeGraph, match_type: str, node: Optional[Node],
-                 user_input: str) -> Optional[LeapDecision]:
+                 user_input: str, pressure: float = 0.0) -> Optional[LeapDecision]:
     """
     H閾値を超えたノードを特定し、それが今回の入力とどう関係するかを判定する。
 
@@ -319,7 +343,7 @@ def _decide_leap(h: HState, graph: NodeGraph, match_type: str, node: Optional[No
       unresolved 未解決入力の蓄積が閾値超過 → 今回がmissなら新規学習で消化
       phantom    実体の無いID（__llm__ など、退場済みノード）→ 破棄
     """
-    leap_needed, hot_nid = h.should_leap()
+    leap_needed, hot_nid = h.should_leap(pressure)
     if not leap_needed:
         return None
 
@@ -441,14 +465,19 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
     """
     node, match_type, nearest = graph.search(user_input)
 
+    # ξ圧は跳躍境界を揺らし(θ_eff)、整合側の更新量にも効く。1ターン1回だけ評価する。
+    pressure = xi_pressure(xi_pool)
+
     if match_type == "exact":
         h.on_exact(node.id)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
+        _reinforce_along_v_b(node, h, pressure, ALIGN_RATE_EXACT)
     elif match_type == "partial":
         h.on_partial(node.id)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
+        _reinforce_along_v_b(node, h, pressure, ALIGN_RATE_PARTIAL)
 
         # 内部応答とLLM信用度の裁定：低confidenceの部分一致は、
         # そのドメインの信用度が上回っているならLLMに譲ったほうがよい
@@ -476,7 +505,7 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
     # --- 構造の再編成(leap)は、今回の応答生成とは独立に処理する ---
     # Hが溜まっている場所（target）と、今回の入力（trigger）は別物なので、
     # 背景ノードの修正結果を今回の応答として返さない。
-    decision = _decide_leap(h, graph, match_type, node, user_input)
+    decision = _decide_leap(h, graph, match_type, node, user_input, pressure)
     leap_response: Optional[tuple[str, str]] = None
 
     if decision is not None:

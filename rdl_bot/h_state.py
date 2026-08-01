@@ -3,9 +3,25 @@ h_state.py
 H_vec 管理: 誤差蓄積の観測
 """
 
+import random
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sized
+
+
+# ξ圧の飽和件数。ξプールがこの件数に達すると圧は最大(1.0)になる。
+XI_SATURATION = 10.0
+
+
+def xi_pressure(xi_pool: Sized, saturation: float = XI_SATURATION) -> float:
+    """
+    ξプールの滞留量を 0〜1 の「ξ圧」に正規化する。
+    ノード化できずに残っている入力が多いほど、現在のM_Bが世界を
+    捉えきれていないことを意味する。
+    """
+    if saturation <= 0:
+        return 0.0
+    return min(1.0, len(xi_pool) / saturation)
 
 
 @dataclass
@@ -24,7 +40,11 @@ class HState:
     # （leapすると新規ノード学習になる）。
     PENDING_MISS_ID = "__unresolved__"
 
-    def __init__(self, theta: float = 2.0):
+    # g(ξ) の係数。θ に対する比率で持つことで θ のスケールに依存しない。
+    XI_DROP_RATIO = 0.25    # ξ圧が最大のとき θ を 25% 下げる（再編圧）
+    XI_JITTER_RATIO = 0.10  # ξ圧が最大のとき境界が ±10% 揺れる
+
+    def __init__(self, theta: float = 2.0, rng: Optional[random.Random] = None):
         self.H_pre: dict[str, float] = {}   # 入力時のノードミスH（軽い）
         self.H_post: dict[str, float] = {}  # 応答後のユーザー反応H（重い）
         self.theta = theta
@@ -32,6 +52,8 @@ class HState:
         self.history: list[HistoryEntry] = []
         self._seq_counter = 0
         self.drift_checkpoint_seq = 0  # 前回のドリフト集計位置（M_Δ相の二重集計を防ぐ）
+        # θ_eff の揺動用。テストから差し替えられるよう外部注入可能にする。
+        self._rng = rng or random.Random()
 
     # --- H_pre 更新 ---
 
@@ -68,7 +90,39 @@ class HState:
     # H_pre / H_post の合成比率。H_pre は軽め（入力ミス）、H_post は重め（ユーザー反応）。
     H_PRE_WEIGHT = 0.4
 
-    def should_leap(self) -> tuple[bool, str]:
+    def _g_xi(self, pressure: float) -> float:
+        """
+        Core §6.2 の g(ξ)。ξ は閾値に直接加算されるのではなく、
+        この関数を介して跳躍境界そのものを揺らす。
+
+        二成分を持つ：
+          系統成分 : ξ が溜まるほど θ_eff を下げる。ノード化できない残余は
+                     「現在のM_Bが世界を捉えきれていない」ことの指標なので、
+                     再編を起こしやすくする方向に働く
+          揺動成分 : ξ が溜まるほど境界のブレ幅が広がる。Core が「揺らす」と
+                     書くとおり、境界は決定的な線ではなくなる
+
+        ξ圧が0のときは厳密に0を返す（ξが無ければ θ_eff == θ）。
+        """
+        if pressure <= 0:
+            return 0.0
+        systematic = -self.XI_DROP_RATIO * pressure
+        stochastic = self._rng.uniform(-1.0, 1.0) * self.XI_JITTER_RATIO * pressure
+        return self.theta * (systematic + stochastic)
+
+    def theta_eff(self, pressure: float = 0.0) -> float:
+        """
+        実効跳躍閾値 θ_eff(t) = θ + g(ξ(t))（Core §6.2）。
+        揺動成分があるため、同じ引数でも呼ぶたびに値が変わりうる。
+        1ターンに1回だけ評価すること。
+        """
+        return self.theta + self._g_xi(pressure)
+
+    def merged_h(self, node_id: str) -> float:
+        """そのノードの合成H（H_pre×重み + H_post）。"""
+        return self.H_pre.get(node_id, 0.0) * self.H_PRE_WEIGHT + self.H_post.get(node_id, 0.0)
+
+    def should_leap(self, pressure: float = 0.0) -> tuple[bool, str]:
         merged = {}
         for nid, v in self.H_pre.items():
             merged[nid] = merged.get(nid, 0) + v * self.H_PRE_WEIGHT
@@ -77,7 +131,7 @@ class HState:
         if not merged:
             return False, ""
         max_id = max(merged, key=lambda k: merged[k])
-        if merged[max_id] > self.theta:
+        if merged[max_id] > self.theta_eff(pressure):
             return True, max_id
         return False, ""
 
@@ -163,10 +217,11 @@ class HState:
 
     # --- 状態表示 ---
 
-    def summary(self) -> str:
+    def summary(self, pressure: float = 0.0) -> str:
         max_pre = max(self.H_pre.values(), default=0.0)
         max_post = max(self.H_post.values(), default=0.0)
-        return f"H_pre_max={max_pre:.2f}  H_post_max={max_post:.2f}  θ={self.theta:.2f}"
+        return (f"H_pre_max={max_pre:.2f}  H_post_max={max_post:.2f}  "
+                f"θ={self.theta:.2f}  ξ圧={pressure:.2f}  θ_eff≈{self.theta_eff(pressure):.2f}")
 
     def hot_nodes(self, top: int = 3) -> list[tuple[str, float]]:
         merged = {}

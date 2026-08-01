@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from node_graph import Node, NodeGraph, _char_ngrams, _ngram_similarity
+from node_graph import ALIGNMENT_CEILING, Node, NodeGraph, _char_ngrams, _ngram_similarity
 
 
 class GraphTestCase(unittest.TestCase):
@@ -252,6 +252,34 @@ class TestLifecycle(GraphTestCase):
         self.assertEqual(n.ttl, 50)
         n.touch()
         self.assertEqual(n.ttl, 100)
+
+    def test_reinforce_approaches_the_ceiling_without_exceeding_it(self):
+        """
+        Core §6.1 の整合側 dM_B/dt。使われ続けるだけでは天井までしか
+        上がらない（1.0 到達は明示的な同意でのみ）。
+        """
+        n = Node(inputs=["x"], confidence=0.5)
+        for _ in range(500):
+            n.reinforce(0.04)
+        self.assertLessEqual(n.confidence, ALIGNMENT_CEILING)
+        self.assertAlmostEqual(n.confidence, ALIGNMENT_CEILING, places=3)
+
+    def test_reinforce_is_monotonic_and_small(self):
+        n = Node(inputs=["x"], confidence=0.5)
+        n.reinforce(0.04)
+        self.assertGreater(n.confidence, 0.5)
+        self.assertLess(n.confidence - 0.5, 0.05)
+
+    def test_reinforce_does_not_pull_high_confidence_down(self):
+        """承認で天井を超えたノードを、整合が引き下げないこと。"""
+        n = Node(inputs=["x"], confidence=1.0)
+        n.reinforce(0.04)
+        self.assertEqual(n.confidence, 1.0)
+
+    def test_zero_rate_is_a_no_op(self):
+        n = Node(inputs=["x"], confidence=0.5)
+        n.reinforce(0.0)
+        self.assertEqual(n.confidence, 0.5)
 
     def test_confidence_decays_only_after_ttl_expires(self):
         n = Node(inputs=["x"], ttl=1, confidence=1.0)

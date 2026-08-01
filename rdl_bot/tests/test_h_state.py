@@ -1,8 +1,83 @@
 """H蓄積とleap判定（h_state.py）"""
 
+import random
 import unittest
 
-from h_state import HState
+from h_state import HState, XI_SATURATION, xi_pressure
+
+
+class TestXiPressure(unittest.TestCase):
+    def test_empty_pool_has_no_pressure(self):
+        self.assertEqual(xi_pressure([]), 0.0)
+
+    def test_pressure_grows_with_the_pool(self):
+        self.assertLess(xi_pressure(["a"]), xi_pressure(["a", "b", "c"]))
+
+    def test_pressure_saturates_at_one(self):
+        self.assertEqual(xi_pressure(["x"] * int(XI_SATURATION * 5)), 1.0)
+
+    def test_zero_saturation_is_harmless(self):
+        self.assertEqual(xi_pressure(["a"], saturation=0), 0.0)
+
+
+class TestThetaEff(unittest.TestCase):
+    """Core §6.2: θ_eff(t) = θ + g(ξ(t))"""
+
+    def test_no_xi_leaves_theta_untouched(self):
+        """ξが無ければ θ_eff は厳密に θ（既存挙動と一致すること）。"""
+        h = HState(theta=2.0)
+        for _ in range(20):
+            self.assertEqual(h.theta_eff(0.0), 2.0)
+
+    def test_xi_lowers_the_boundary_on_average(self):
+        """
+        回帰テスト: ξプールは存在したが θ に一切影響せず、ξ が動態から
+        切り離されていた（Core §6.2 の g(ξ) が未実装）。
+        """
+        h = HState(theta=2.0, rng=random.Random(0))
+        samples = [h.theta_eff(1.0) for _ in range(200)]
+        self.assertLess(sum(samples) / len(samples), 2.0)
+
+    def test_xi_makes_the_boundary_fluctuate(self):
+        """Core は ξ が閾値を『揺らす』と定める。決定的な線ではなくなること。"""
+        h = HState(theta=2.0, rng=random.Random(0))
+        samples = {round(h.theta_eff(1.0), 6) for _ in range(50)}
+        self.assertGreater(len(samples), 1)
+
+    def test_boundary_stays_positive(self):
+        h = HState(theta=2.0, rng=random.Random(0))
+        for _ in range(500):
+            self.assertGreater(h.theta_eff(1.0), 0.0)
+
+    def test_more_xi_widens_the_swing(self):
+        h = HState(theta=2.0, rng=random.Random(1))
+        def spread(p):
+            s = [h.theta_eff(p) for _ in range(400)]
+            return max(s) - min(s)
+        self.assertGreater(spread(1.0), spread(0.3))
+
+    def test_xi_makes_leaping_easier(self):
+        """同じHでも、ξが溜まっていれば跳躍しやすくなること。"""
+        def leaps(pressure, seed):
+            h = HState(theta=2.0, rng=random.Random(seed))
+            h.on_deny("A"); h.on_deny("A")   # H_post=2.0 — θちょうどでは超えない
+            return h.should_leap(pressure)[0]
+        self.assertFalse(leaps(0.0, 0))
+        self.assertTrue(any(leaps(1.0, s) for s in range(20)))
+
+    def test_summary_reports_theta_eff(self):
+        self.assertIn("θ_eff", HState(theta=2.0).summary(0.5))
+
+
+class TestMergedH(unittest.TestCase):
+    def test_combines_pre_and_post_with_weights(self):
+        h = HState(theta=2.0)
+        h.on_miss("A")      # H_pre += 0.5
+        h.on_deny("A")      # H_post += 1.0
+        self.assertAlmostEqual(h.merged_h("A"), 0.5 * HState.H_PRE_WEIGHT + 1.0)
+
+    def test_untouched_node_is_zero(self):
+        self.assertEqual(HState().merged_h("nope"), 0.0)
 
 
 class TestLeapThreshold(unittest.TestCase):

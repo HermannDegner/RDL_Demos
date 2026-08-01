@@ -10,6 +10,11 @@ from typing import Optional, List, Dict, Tuple
 # 置換され、使われないまま confidence が下がれば退場する。
 SEED_SOURCES = frozenset({"llm_seed", "bootstrap_seed"})
 
+# 整合（使われ続けること）だけで到達できる confidence の上限。
+# ここを 1.0 にすると、検証されていないノードが承認済みノードと
+# 見分けがつかなくなる。1.0 は明示的な同意(y)でのみ到達する。
+ALIGNMENT_CEILING = 0.9
+
 # これ未満の類似度しか無いノードは「最近傍」とみなさない。
 # 未知入力のHを、たまたま登録順が早いだけの無関係なノードへ
 # 積み上げてしまうのを防ぐ。
@@ -80,6 +85,22 @@ class Node:
         })
         if len(self.counterexamples) > 50:
             self.counterexamples = self.counterexamples[-50:]
+
+    def reinforce(self, rate: float, ceiling: float = ALIGNMENT_CEILING):
+        """
+        Core §6.1 の整合側の微小更新（dM_B/dt が V_B に沿って動く分）。
+
+        このノードが実際に応答を担ったということは、M_B のその方向
+        （＝このノードが張る安定方向）が今回も通用したということ。
+        慣性の強さ Λ に相当する confidence を、天井へ向けて漸近的に上げる。
+
+        天井は 1.0 ではない。使われ続けるだけで最大確信に達してしまうと、
+        ユーザー承認(approval_count)による検証と区別がつかなくなる。
+        1.0 に到達できるのは明示的な同意(y)だけ。
+        """
+        if rate <= 0 or self.confidence >= ceiling:
+            return
+        self.confidence += rate * (ceiling - self.confidence)
 
     def decay_confidence(self):
         # 設計書 v0.3 の M_Δ相 にある「低confidence・低使用頻度ノードのTTL減算と削除」を反映

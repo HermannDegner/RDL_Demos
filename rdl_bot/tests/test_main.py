@@ -1,6 +1,7 @@
 """応答ループ・leapフロー・代謝（main.py）"""
 
 import os
+import random
 import tempfile
 import unittest
 from unittest import mock
@@ -395,6 +396,82 @@ class TestMetabolize(RespondTestCase):
         xi = ["まったく無関係な話題"]
         main.metabolize(g, self.sfo, xi, HState(), retire=True)
         self.assertEqual(xi, ["まったく無関係な話題"])
+
+
+class TestAlignmentUpdate(RespondTestCase):
+    """Core §6.1: 整合領域でも dM_B/dt は V_B に沿って微小に動く。"""
+
+    def test_exact_match_reinforces_the_node(self):
+        """
+        回帰テスト: 整合側に dM_B/dt がまったく存在せず（touch と usage_count
+        だけ）、H閾値を境に「何も起きない」から「全面再編」へ不連続に
+        飛んでいた（Core §6.3 整合と跳躍の同一性が成立しない）。
+        """
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        g = self.graph(n)
+        self.respond("こんにちは", g, HState())
+        self.assertGreater(n.confidence, 0.5)
+
+    def test_partial_match_reinforces_less_than_exact(self):
+        exact_node = Node(inputs=["疲れた"], response="休もう", confidence=0.5)
+        partial_node = Node(inputs=["疲れた"], response="休もう", confidence=0.5)
+        self.respond("疲れた", self.graph(exact_node), HState())
+        self.respond("今日はとても疲れた", self.graph(partial_node), HState())
+        self.assertGreater(exact_node.confidence, partial_node.confidence)
+
+    def test_reinforcement_vanishes_as_the_boundary_is_approached(self):
+        """
+        H が θ_eff に近づくほど整合の更新は 0 に漸近する。
+        これにより整合と跳躍が同じ量 H に対する連続な応答になる。
+        """
+        calm = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        self.respond("こんにちは", self.graph(calm), HState(theta=2.0))
+        calm_gain = calm.confidence - 0.5
+
+        hot = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        h = HState(theta=2.0)
+        h.on_deny(hot.id)          # 境界に近い状態
+        h.on_deny(hot.id)
+        self.respond("こんにちは", self.graph(hot), h)
+        hot_gain = hot.confidence - 0.5
+
+        self.assertGreater(calm_gain, hot_gain)
+        self.assertGreaterEqual(hot_gain, 0.0)
+
+    def test_alignment_alone_cannot_reach_full_confidence(self):
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        g = self.graph(n)
+        for _ in range(300):
+            self.respond("こんにちは", g, HState())
+        self.assertLess(n.confidence, 1.0)
+
+    def test_miss_reinforces_nothing(self):
+        n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
+        g = self.graph(n)
+        self.respond("まったく無関係な話題", g, HState())
+        self.assertEqual(n.confidence, 0.5)
+
+
+class TestXiAffectsTheBoundary(RespondTestCase):
+    def test_xi_pool_is_wired_into_the_leap_threshold(self):
+        """
+        回帰テスト: ξプールは存在したが theta を一度も読まず、ξ が動態から
+        切り離されていた（Core §6.2 θ_eff = θ + g(ξ) が未実装）。
+        """
+        n = Node(inputs=["こんにちは"], response="やあ")
+        g = self.graph(n)
+        h = HState(theta=2.0, rng=random.Random(0))
+        h.on_deny(n.id)
+        h.on_deny(n.id)   # H_post=2.0 — ξが無ければ跳躍しない
+
+        without_xi = main._decide_leap(h, g, "exact", n, "こんにちは", pressure=0.0)
+        self.assertIsNone(without_xi)
+
+        fired = any(
+            main._decide_leap(h, g, "exact", n, "こんにちは", pressure=1.0) is not None
+            for _ in range(30)
+        )
+        self.assertTrue(fired)
 
 
 class TestSeedLoading(RespondTestCase):
