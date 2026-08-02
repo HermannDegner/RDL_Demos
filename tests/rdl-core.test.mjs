@@ -67,8 +67,87 @@ test("MBNode は EFP を F に解釈し、慣性投影との差を E として�
 
   assert.deepEqual(first.F, { resource: 0.5, motion: 0.4 });
   assert.deepEqual(first.E, { resource: 0.3, motion: 0.2 });
+  assertClose(first.dMB.previous.resource, 0.5);
+  assertClose(first.dMB.current.resource, 0.507);
   assert.equal(first.leap, null);
   assert.equal(node.snapshot().phase, "M_act");
+});
+
+test("MBNode は整合領域でも reliability を微小更新する", () => {
+  const boundary = new Boundary({
+    dimensions: ["resource"],
+    thetaBase: 2,
+  });
+  const node = new MBNode({
+    id: "learner",
+    boundary,
+    reliability: 0.4,
+    alignRate: 0.5,
+    xiGain: 0,
+  });
+
+  const result = node.update({
+    actualF: { resource: 0.9 },
+    predictedF: { resource: 0.7 },
+  });
+
+  assertClose(result.E.resource, 0.2);
+  assertClose(result.dMB.previous.resource, 0.4);
+  assertClose(result.dMB.current.resource, 0.6);
+  assertClose(node.snapshot().reliability.resource, 0.6);
+});
+
+test("MBNode の ξ は既定値で飽和せず誤差の大きさを保つ", () => {
+  const boundary = new Boundary({ dimensions: ["resource"] });
+  const lowError = new MBNode({ id: "low-error", boundary, reliability: 1 });
+  const highError = new MBNode({ id: "high-error", boundary, reliability: 1 });
+
+  for (let tick = 0; tick < 120; tick += 1) {
+    lowError.update({
+      actualF: { resource: 0.1 },
+      predictedF: { resource: 0 },
+      tick,
+    });
+    highError.update({
+      actualF: { resource: 0.5 },
+      predictedF: { resource: 0 },
+      tick,
+    });
+  }
+
+  assert.ok(lowError.xi > 0.15 && lowError.xi < 0.25);
+  assert.ok(highError.xi > 0.9 && highError.xi < 1.05);
+  assert.ok(highError.xi > lowError.xi * 4);
+});
+
+test("LeapEngine の既定 cooldown は即時再跳躍を止める", () => {
+  const boundary = new Boundary({
+    dimensions: ["danger"],
+    thetaBase: 0.2,
+  });
+  const node = new MBNode({
+    id: "oscillation-guard",
+    boundary,
+    reliability: 1,
+    h: new HVector({ dimensions: ["danger"], decay: 1, gain: 1 }),
+    xiGain: 0,
+  });
+
+  const first = node.update({
+    actualF: { danger: 1 },
+    predictedF: { danger: 0 },
+    tick: 1,
+  });
+  const second = node.update({
+    actualF: { danger: 1 },
+    predictedF: { danger: 0 },
+    tick: 2,
+  });
+
+  assert.equal(first.leap.dimension, "danger");
+  assert.equal(second.leap, null);
+  assert.equal(node.leapCount, 1);
+  assert.equal(node.leapCooldown, 9);
 });
 
 test("LeapEngine は H が閾値を越えた最大次元を M_delta へ送る", () => {
@@ -89,6 +168,8 @@ test("LeapEngine は H が閾値を越えた最大次元を M_delta へ送る", 
     id: "rabbit",
     boundary,
     reliability: 1,
+    alignRate: 0,
+    reliabilityMax: 1,
     h: new HVector({ dimensions: ["danger", "motion"], decay: 0, gain: 1 }),
     leapEngine,
     xiGain: 0,

@@ -18,6 +18,7 @@ const F = boundary.interpret(node, efp);
 const predictedF = node.project(previousF);
 const E = node.compare(predictedF, F);
 node.h.record(E);
+node.updateReliability(E);
 node.leapEngine.maybeLeap(node);
 ```
 
@@ -30,6 +31,23 @@ node.leapEngine.maybeLeap(node);
 | `HVector` | `H_vec` | 次元別の慣性誤差蓄積 |
 | `LeapEngine` | `M_Δ -> M_B'` | 閾値超過時の再編処理 |
 | `MBGraph` | `W_ij` / 入れ子 | M_B 間の関係ネットワーク |
+
+## 既定の動態
+
+`MBNode.update()` は、跳躍時だけでなく整合領域でも `M_B` を微小更新する。
+既定では Living Field と同じ形で、予測誤差が小さい次元ほど信頼度が上がり、
+誤差が大きい次元ほど下がる。
+
+```text
+reliability_i(t+1) = lerp(reliability_i(t), 1 - E_i(t), alignRate_i)
+```
+
+`ξ` は予測誤差から増え、tick ごとに散逸する。既定値は飽和して情報を失わない
+ことを優先し、`xiDecay = 0.94`、`xiGain = 0.12`、`xiMax = 1.2` としている。
+
+`LeapEngine` は既定で `cooldownTicks = 10` を持つ。これは参照実装をそのまま
+走らせたとき、跳躍直後に同じ構造が再跳躍し続ける振動を避けるための安全側の
+初期値である。デモ側でより速い再編を観察したい場合は明示的に上書きする。
 
 ## 最小例
 
