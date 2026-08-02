@@ -407,9 +407,16 @@ function drawFocusRelations(rabbit) {
 
 function drawThreat() {
   const threat = simulation.threat;
-  const color = threat.state === "chase" ? "#ff716a" : "#cc615d";
+  const color = threat.state === "attack"
+    ? "#ffb15d"
+    : threat.state === "recover"
+      ? "#9f7770"
+      : threat.state === "chase"
+        ? "#ff716a"
+        : "#cc615d";
+  const active = threat.state === "chase" || threat.state === "attack";
   context.save();
-  context.strokeStyle = threat.state === "chase"
+  context.strokeStyle = active
     ? "rgba(244, 99, 92, 0.2)"
     : "rgba(211, 104, 98, 0.11)";
   context.lineWidth = 1;
@@ -421,7 +428,7 @@ function drawThreat() {
   context.rotate(Math.atan2(threat.vy, threat.vx));
   context.fillStyle = color;
   context.shadowColor = color;
-  context.shadowBlur = threat.state === "chase" ? 14 : 7;
+  context.shadowBlur = threat.state === "attack" ? 20 : active ? 14 : 7;
   context.beginPath();
   context.moveTo(13, 0);
   context.lineTo(-9, -7);

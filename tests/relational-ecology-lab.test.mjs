@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   CONFIG,
+  SeededRandom,
   Simulation,
+  Threat,
   WORLD_HEIGHT,
   WORLD_WIDTH,
 } from "../demos/relational-ecology-lab/core.mjs";
@@ -128,4 +130,73 @@ test("観測用 metrics と snapshot の読み出しは行動系列へ影響し�
   }
 
   assert.deepEqual(untouched.snapshot(), observed.snapshot());
+});
+
+test("捕食者は接近後に加速行動へ入り、終了後は低速で回復する", () => {
+  const simulation = new Simulation({ seed: 808 });
+  const rabbit = simulation.rabbits[0];
+  const threat = simulation.threat;
+  simulation.rabbits = [rabbit];
+  simulation.world.canThreatSee = () => true;
+
+  rabbit.x = 140;
+  rabbit.y = 120;
+  rabbit.vx = 0;
+  rabbit.vy = 0;
+  threat.x = 110;
+  threat.y = 120;
+  threat.vx = 1;
+  threat.vy = 0;
+
+  const event = threat.update(simulation.world, simulation.rabbits, simulation.rng);
+
+  assert.equal(event.type, "attack");
+  assert.equal(threat.state, "attack");
+  assert.ok(Math.hypot(threat.vx, threat.vy) > 2.5);
+
+  threat.attackTicks = 0;
+  const miss = threat.update(simulation.world, simulation.rabbits, simulation.rng);
+
+  assert.equal(miss.type, "attack-miss");
+  assert.equal(threat.state, "recover");
+  assert.ok(Math.hypot(threat.vx, threat.vy) <= CONFIG.threatRecoverySpeed);
+});
+
+test("同じ接触値でも逃走成立時は離脱し、未成立時は捕食される", () => {
+  const makeEncounter = (label) => {
+    const simulation = new Simulation({ seed: 909 });
+    const rabbit = simulation.rabbits[0];
+    const threat = new Threat(100, 100, new SeededRandom(2), simulation.config);
+    rabbit.x = 108;
+    rabbit.y = 100;
+    rabbit.vx = 1;
+    rabbit.vy = 0;
+    rabbit.decision = { label, actual: { danger: 0 } };
+    threat.state = "attack";
+    threat.targetId = rabbit.id;
+    threat.attackTicks = 4;
+    return { rabbit, threat };
+  };
+  const fixedRoll = { next: () => 0.5 };
+
+  const escaping = makeEncounter("escape");
+  const escapedEvent = escaping.threat.resolveAttack(
+    [escaping.rabbit],
+    fixedRoll,
+    12,
+  );
+  assert.equal(escapedEvent.type, "attack-escaped");
+  assert.equal(escaping.rabbit.alive, true);
+  assert.equal(escaping.threat.state, "recover");
+  assert.equal(escaping.rabbit.decision.actual.danger, 1);
+
+  const unaware = makeEncounter("food");
+  const captureEvent = unaware.threat.resolveAttack(
+    [unaware.rabbit],
+    fixedRoll,
+    12,
+  );
+  assert.equal(captureEvent.type, "capture");
+  assert.equal(unaware.rabbit.alive, false);
+  assert.equal(unaware.threat.state, "rest");
 });
