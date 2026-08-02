@@ -164,6 +164,7 @@ export class MemoryField {
     this.water = new Float32Array(this.size);
     this.cover = new Float32Array(this.size);
     this.danger = new Float32Array(this.size);
+    this.prey = new Float32Array(this.size);
     this.motion = new Float32Array(this.size);
     this.visits = new Float32Array(this.size);
   }
@@ -192,6 +193,7 @@ export class MemoryField {
       water: this.water[index],
       cover: this.cover[index],
       danger: this.danger[index],
+      prey: this.prey[index],
       motion: this.motion[index],
       visits: this.visits[index],
     };
@@ -203,6 +205,7 @@ export class MemoryField {
       this.water[index] *= 0.994;
       this.cover[index] *= 0.997;
       this.danger[index] *= 0.965;
+      this.prey[index] *= 0.982;
       this.motion[index] *= 0.986;
       this.visits[index] *= 0.998;
     }
@@ -223,7 +226,14 @@ export class MemoryField {
     }
   }
 
-  integrate(perception, rabbit) {
+  integrate(perception, agent) {
+    if (agent.profile?.kind === "predator") {
+      return this.integratePredator(perception, agent);
+    }
+    return this.integrateRabbit(perception, agent);
+  }
+
+  integrateRabbit(perception, rabbit) {
     this.decay();
     let staleResource = 0;
 
@@ -278,6 +288,37 @@ export class MemoryField {
     return staleResource;
   }
 
+  integratePredator(perception, predator) {
+    this.decay();
+    let stalePrey = 0;
+
+    for (const cell of perception.observedCells ?? []) {
+      const index = cell.index;
+      if (cell.prey < 0.04 && this.prey[index] > 0.28) {
+        stalePrey = Math.max(stalePrey, this.prey[index] - cell.prey);
+      }
+      this.prey[index] = lerp(
+        this.prey[index],
+        cell.prey,
+        cell.prey > 0.04 ? 0.82 : 0.34,
+      );
+    }
+
+    for (const rabbit of perception.visiblePrey ?? []) {
+      const intensity = clamp(1 - distance(predator, rabbit) / predator.profile.visionRange);
+      this.stamp(this.prey, rabbit.x, rabbit.y, 0.58 + intensity * 0.42, 2);
+    }
+
+    for (const obstacle of perception.visibleObstacles ?? []) {
+      const radiusInCells = Math.max(1, Math.ceil(obstacle.radius / 40));
+      this.stamp(this.motion, obstacle.x, obstacle.y, 1, radiusInCells);
+    }
+
+    const visitIndex = this.indexAt(predator.x, predator.y);
+    this.visits[visitIndex] = clamp(this.visits[visitIndex] + 0.18);
+    return stalePrey;
+  }
+
   recordMotion(x, y, blocked) {
     const index = this.indexAt(x, y);
     const target = blocked ? 1 : 0;
@@ -294,6 +335,10 @@ export class MemoryField {
 
   softenDangerMemory(factor) {
     for (let index = 0; index < this.size; index += 1) this.danger[index] *= factor;
+  }
+
+  fadePreyMemory(factor) {
+    for (let index = 0; index < this.size; index += 1) this.prey[index] *= factor;
   }
 }
 
@@ -442,8 +487,47 @@ export class World {
   canThreatSee(threat, rabbit) {
     if (!rabbit.alive) return false;
     const cover = this.coverAt(rabbit.x, rabbit.y);
-    const range = this.config.threatVisionRange * (cover > 0.35 ? 0.5 : 1);
+    const baseRange = threat.profile?.visionRange ?? this.config.threatVisionRange;
+    const range = baseRange * (cover > 0.35 ? 0.5 : 1);
     return distance(threat, rabbit) <= range && !this.lineBlocked(threat, rabbit);
+  }
+
+  perceivePredator(predator, rabbits) {
+    const visiblePrey = rabbits.filter((rabbit) => this.canThreatSee(predator, rabbit));
+    const visibleObstacles = this.obstacles.filter(
+      (obstacle) => Math.max(0, distance(predator, obstacle) - obstacle.radius)
+        <= predator.profile.visionRange
+        && !this.lineBlockedByObstacle(predator, obstacle, obstacle.id)
+        && !this.lineBlockedByCover(predator, obstacle),
+    );
+    return {
+      visiblePrey,
+      visibleObstacles,
+      observedCells: null,
+    };
+  }
+
+  enrichPredatorPerception(predator, perception) {
+    const observedCells = [];
+    for (let row = 0; row < predator.memory.rows; row += 1) {
+      for (let column = 0; column < predator.memory.columns; column += 1) {
+        const center = predator.memory.cellCenter(column, row);
+        if (distance(predator, center) > predator.profile.visionRange) continue;
+        if (this.lineBlocked(predator, center)) continue;
+
+        let prey = 0;
+        for (const rabbit of perception.visiblePrey) {
+          const edgeDistance = Math.max(0, distance(center, rabbit) - 7);
+          if (edgeDistance > 78) continue;
+          prey = Math.max(prey, clamp(1 - edgeDistance / 78));
+        }
+        observedCells.push({
+          index: predator.memory.index(column, row),
+          prey,
+        });
+      }
+    }
+    return { ...perception, observedCells };
   }
 
   perceiveRabbit(rabbit, threat, rng) {
@@ -666,45 +750,130 @@ const ACTIONS = [
   }),
 ];
 
-export class Rabbit {
-  constructor(id, x, y, rng, config = CONFIG) {
+export class RabbitProfile {
+  constructor(config = CONFIG) {
+    this.kind = "rabbit";
+    this.name = "Rabbit";
+    this.radius = 7;
+    this.visionRange = config.visionRange;
+    this.planInterval = config.planInterval;
+    this.initialSpeed = [0.4, 0.9];
+    this.errorDimensions = ["resource", "danger", "motion"];
+    this.dimensionLabels = {
+      resource: "資源",
+      danger: "危険",
+      motion: "移動",
+    };
+    this.errorDynamics = {
+      resource: { decay: 0.78, gain: 0.72 },
+      danger: { decay: 0.8, gain: 0.82 },
+      motion: { decay: 0.76, gain: 0.64 },
+    };
+    this.initialReliability = { resource: 0.78, danger: 0.8, motion: 0.86 };
+    this.needHeading = "生存ニーズ";
+    this.overlays = [
+      { value: "actual", option: "物理環境のみ", label: "観測: 物理環境" },
+      { value: "resource", option: "個体の食・水記憶", label: "内部場: 食・水記憶" },
+      { value: "danger", option: "個体の危険記憶", label: "内部場: 危険記憶" },
+      { value: "motion", option: "個体の移動誤差", label: "内部場: 移動誤差" },
+      { value: "visits", option: "個体の探索履歴", label: "内部場: 探索履歴" },
+    ];
+  }
+
+  needIndicators(agent) {
+    return [
+      { label: "空腹", value: agent.hunger },
+      { label: "渇き", value: agent.thirst },
+      { label: "恐怖", value: agent.fear },
+      { label: "疲労", value: agent.fatigue },
+    ];
+  }
+
+  status(agent) {
+    return agent.alive ? "alive" : "stopped";
+  }
+}
+
+export class PredatorProfile {
+  constructor(config = CONFIG) {
+    this.kind = "predator";
+    this.name = "Predator";
+    this.radius = 10;
+    this.visionRange = config.threatVisionRange;
+    this.planInterval = Math.max(8, config.planInterval - 3);
+    this.initialSpeed = [0.8, 0.8];
+    this.errorDimensions = ["prey", "attack", "motion"];
+    this.dimensionLabels = {
+      prey: "獲物",
+      attack: "捕食",
+      motion: "移動",
+    };
+    this.errorDynamics = {
+      prey: { decay: 0.78, gain: 0.78 },
+      attack: { decay: 0.8, gain: 0.88 },
+      motion: { decay: 0.76, gain: 0.66 },
+    };
+    this.initialReliability = { prey: 0.76, attack: 0.72, motion: 0.84 };
+    this.needHeading = "捕食者の内部状態";
+    this.overlays = [
+      { value: "actual", option: "物理環境のみ", label: "観測: 物理環境" },
+      { value: "prey", option: "捕食者の獲物記憶", label: "内部場: 獲物記憶" },
+      { value: "motion", option: "捕食者の移動誤差", label: "内部場: 移動誤差" },
+      { value: "visits", option: "捕食者の探索履歴", label: "内部場: 探索履歴" },
+    ];
+  }
+
+  needIndicators(agent) {
+    return [
+      { label: "空腹", value: agent.hunger },
+      { label: "疲労", value: agent.fatigue },
+      { label: "追跡圧", value: agent.pursuitPressure },
+      {
+        label: "回復負荷",
+        value: Math.max(
+          agent.recoveryTicks / agent.config.threatRecoveryTicks,
+          agent.restTicks / 150,
+        ),
+      },
+    ];
+  }
+
+  status(agent) {
+    return agent.state;
+  }
+}
+
+function dimensionState(dimensions, initial = 0) {
+  return Object.fromEntries(dimensions.map((dimension) => [dimension, initial]));
+}
+
+export class RelationalAgent {
+  constructor({ id, x, y, rng, config = CONFIG, profile }) {
     const angle = rng.angle();
+    const speed = rng.range(profile.initialSpeed[0], profile.initialSpeed[1]);
     this.id = id;
     this.x = x;
     this.y = y;
-    this.vx = Math.cos(angle) * rng.range(0.4, 0.9);
-    this.vy = Math.sin(angle) * rng.range(0.4, 0.9);
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
     this.alive = true;
     this.causeOfDeath = null;
-    this.hunger = rng.range(0.2, 0.36);
-    this.thirst = rng.range(0.18, 0.34);
-    this.fatigue = rng.range(0.08, 0.18);
-    this.fear = rng.range(0.02, 0.07);
+    this.profile = profile;
     this.memory = new MemoryField(config.memoryColumns, config.memoryRows);
-    this.weights = {
-      food: rng.range(1.05, 1.3),
-      water: rng.range(1.08, 1.34),
-      cover: rng.range(0.72, 0.95),
-      danger: rng.range(1.8, 2.15),
-      cost: rng.range(0.55, 0.78),
-      memory: rng.range(0.78, 0.95),
-    };
-    this.reliability = { resource: 0.78, danger: 0.8, motion: 0.86 };
-    this.exploration = rng.range(0.14, 0.22);
-    this.soundCaution = rng.range(0.72, 0.9);
-    this.H = { resource: 0, danger: 0, motion: 0 };
-    this.lastError = { resource: 0, danger: 0, motion: 0 };
+    this.reliability = { ...profile.initialReliability };
+    this.H = dimensionState(profile.errorDimensions);
+    this.lastError = dimensionState(profile.errorDimensions);
     this.xi = 0;
-    this.thetaBase = rng.range(0.76, 0.88);
+    this.thetaBase = profile.kind === "predator"
+      ? rng.range(0.74, 0.86)
+      : rng.range(0.76, 0.88);
     this.planTimer = 0;
     this.decision = null;
     this.lastPerception = null;
-    this.lastSawThreat = false;
     this.leapCount = 0;
     this.leapPulse = 0;
     this.leapCooldown = 0;
     this.events = [];
-    this.lastIntakeLogTick = -999;
     this.lastLoggedDecision = { title: null, tick: -999 };
     this.config = config;
   }
@@ -713,9 +882,83 @@ export class Rabbit {
     return clamp(this.thetaBase - this.xi * 0.26, 0.5, 1.05);
   }
 
+  get focusKey() {
+    return `${this.profile.kind}:${this.id}`;
+  }
+
   log(tick, type, title, detail = "") {
     this.events.unshift({ tick, type, title, detail });
     if (this.events.length > 12) this.events.length = 12;
+  }
+
+  beginRelationalTick() {
+    if (this.leapPulse > 0) this.leapPulse -= 1;
+    if (this.leapCooldown > 0) this.leapCooldown -= 1;
+    this.xi *= 0.9985;
+  }
+
+  recordPredictionErrors(error, tick) {
+    this.lastError = { ...error };
+    for (const dimension of this.profile.errorDimensions) {
+      const dynamics = this.profile.errorDynamics[dimension];
+      this.H[dimension] = this.H[dimension] * dynamics.decay + error[dimension] * dynamics.gain;
+      this.reliability[dimension] = clamp(
+        lerp(this.reliability[dimension], 1 - error[dimension], 0.035),
+        0.18,
+        0.98,
+      );
+    }
+
+    const largestError = Math.max(...Object.values(error));
+    if (largestError > 0.42) {
+      const detail = this.profile.errorDimensions
+        .map((dimension) => `${this.profile.dimensionLabels[dimension]} ${error[dimension].toFixed(2)}`)
+        .join(" / ");
+      this.log(tick, "error", `予測差 ${largestError.toFixed(2)}`, detail);
+    }
+  }
+
+  maybeLeap(tick) {
+    if (this.leapCooldown > 0) return null;
+    const entries = Object.entries(this.H).sort((a, b) => b[1] - a[1]);
+    const [dimension, pressure] = entries[0];
+    if (pressure < this.thetaEffective) return null;
+
+    const leap = this.applyLeap(dimension);
+    for (const errorDimension of this.profile.errorDimensions) {
+      this.H[errorDimension] *= 0.28;
+    }
+    this.leapCount += 1;
+    this.leapPulse = 34;
+    this.leapCooldown = 96;
+    this.log(tick, "leap", leap.title, leap.detail);
+    return { dimension, ...leap };
+  }
+
+  applyLeap() {
+    throw new Error("RelationalAgent.applyLeap must be implemented by a species agent");
+  }
+}
+
+export class Rabbit extends RelationalAgent {
+  constructor(id, x, y, rng, config = CONFIG) {
+    super({ id, x, y, rng, config, profile: new RabbitProfile(config) });
+    this.hunger = rng.range(0.2, 0.36);
+    this.thirst = rng.range(0.18, 0.34);
+    this.fatigue = rng.range(0.08, 0.18);
+    this.fear = rng.range(0.02, 0.07);
+    this.weights = {
+      food: rng.range(1.05, 1.3),
+      water: rng.range(1.08, 1.34),
+      cover: rng.range(0.72, 0.95),
+      danger: rng.range(1.8, 2.15),
+      cost: rng.range(0.55, 0.78),
+      memory: rng.range(0.78, 0.95),
+    };
+    this.exploration = rng.range(0.14, 0.22);
+    this.soundCaution = rng.range(0.72, 0.9);
+    this.lastSawThreat = false;
+    this.lastIntakeLogTick = -999;
   }
 
   shouldReplan(perception) {
@@ -728,7 +971,6 @@ export class Rabbit {
     this.hunger = clamp(this.hunger + 0.00025);
     this.thirst = clamp(this.thirst + 0.00034);
     this.fear *= 0.991;
-    this.xi *= 0.9985;
 
     let dangerExposure = 0;
     if (perception.visibleThreat) {
@@ -761,13 +1003,7 @@ export class Rabbit {
       danger: Math.abs(observed.danger - predicted.danger),
       motion: Math.abs(observed.motion - predicted.motion),
     };
-    this.lastError = error;
-    this.H.resource = this.H.resource * 0.78 + error.resource * 0.72;
-    this.H.danger = this.H.danger * 0.8 + error.danger * 0.82;
-    this.H.motion = this.H.motion * 0.76 + error.motion * 0.64;
-    this.reliability.resource = clamp(lerp(this.reliability.resource, 1 - error.resource, 0.035), 0.18, 0.98);
-    this.reliability.danger = clamp(lerp(this.reliability.danger, 1 - error.danger, 0.035), 0.18, 0.98);
-    this.reliability.motion = clamp(lerp(this.reliability.motion, 1 - error.motion, 0.035), 0.18, 0.98);
+    this.recordPredictionErrors(error, tick);
     this.xi = clamp(
       this.xi
         + Math.min(0.16, actual.heardUnseen * 0.004)
@@ -775,24 +1011,9 @@ export class Rabbit {
       0,
       1.2,
     );
-
-    const largestError = Math.max(error.resource, error.danger, error.motion);
-    if (largestError > 0.42) {
-      this.log(
-        tick,
-        "error",
-        `予測差 ${largestError.toFixed(2)}`,
-        `資源 ${error.resource.toFixed(2)} / 危険 ${error.danger.toFixed(2)} / 移動 ${error.motion.toFixed(2)}`,
-      );
-    }
   }
 
-  maybeLeap(tick) {
-    if (this.leapCooldown > 0) return null;
-    const entries = Object.entries(this.H).sort((a, b) => b[1] - a[1]);
-    const [dimension, pressure] = entries[0];
-    if (pressure < this.thetaEffective) return null;
-
+  applyLeap(dimension) {
     let title;
     let detail;
     if (dimension === "resource") {
@@ -821,15 +1042,7 @@ export class Rabbit {
       title = "Leap: 経路仮説を組み替え";
       detail = "停滞した方向を避け、別の進行角へ切り替えた";
     }
-
-    this.H.resource *= 0.28;
-    this.H.danger *= 0.28;
-    this.H.motion *= 0.28;
-    this.leapCount += 1;
-    this.leapPulse = 34;
-    this.leapCooldown = 96;
-    this.log(tick, "leap", title, detail);
-    return { dimension, title, detail };
+    return { title, detail };
   }
 
   plan(perception, rng, tick) {
@@ -962,7 +1175,7 @@ export class Rabbit {
       },
       age: 0,
     };
-    this.planTimer = this.config.planInterval;
+    this.planTimer = this.profile.planInterval;
     if (title !== this.lastLoggedDecision.title || tick - this.lastLoggedDecision.tick >= 60) {
       this.log(tick, "decision", title, reason);
       this.lastLoggedDecision = { title, tick };
@@ -971,8 +1184,7 @@ export class Rabbit {
 
   advance(perception, shouldPlan, rng, tick) {
     if (!this.alive) return;
-    if (this.leapPulse > 0) this.leapPulse -= 1;
-    if (this.leapCooldown > 0) this.leapCooldown -= 1;
+    this.beginRelationalTick();
     this.updateNeeds(perception);
 
     if (shouldPlan) {
@@ -1071,26 +1283,327 @@ export class Rabbit {
   }
 }
 
-export class Threat {
+export class Predator extends RelationalAgent {
   constructor(x, y, rng, config = CONFIG) {
-    const angle = rng.angle();
-    this.x = x;
-    this.y = y;
-    this.vx = Math.cos(angle) * 0.8;
-    this.vy = Math.sin(angle) * 0.8;
+    super({
+      id: "predator",
+      x,
+      y,
+      rng,
+      config,
+      profile: new PredatorProfile(config),
+    });
     this.state = "wander";
     this.targetId = null;
-    this.lastSeen = null;
-    this.memoryTicks = 0;
     this.restTicks = 0;
     this.attackTicks = 0;
     this.attackDirection = null;
     this.recoveryTicks = 0;
-    this.config = config;
+    this.hunger = rng.range(0.34, 0.48);
+    this.fatigue = rng.range(0.08, 0.16);
+    this.pursuitPressure = 0;
+    this.exploration = rng.range(0.16, 0.23);
+    this.weights = {
+      prey: rng.range(1.42, 1.72),
+      attack: rng.range(0.88, 1.12),
+      cost: rng.range(0.54, 0.72),
+      memory: rng.range(0.8, 0.96),
+    };
+    this.attackLeadTicks = rng.range(2.4, 3.6);
+    this.attackRangeFactor = rng.range(1, 1.08);
+    this.lastSawPrey = false;
   }
 
-  beginAttack(target) {
-    const leadTicks = 3;
+  shouldReplan(perception) {
+    if (!this.decision || this.planTimer <= 0) return true;
+    const seesPrey = perception.visiblePrey.length > 0;
+    if (seesPrey !== this.lastSawPrey) return true;
+    return seesPrey && !perception.visiblePrey.some((rabbit) => rabbit.id === this.targetId);
+  }
+
+  updateNeeds(perception) {
+    this.hunger = clamp(this.hunger + 0.0002);
+    this.pursuitPressure *= 0.97;
+    if (perception.visiblePrey.length > 0) {
+      const nearest = Math.min(...perception.visiblePrey.map((rabbit) => distance(this, rabbit)));
+      this.pursuitPressure = Math.max(
+        this.pursuitPressure,
+        clamp(1 - nearest / this.profile.visionRange),
+      );
+    }
+
+    if (this.decision) {
+      const actual = this.decision.actual;
+      if (perception.visiblePrey.length > 0) {
+        const nearest = Math.min(...perception.visiblePrey.map((rabbit) => distance(this, rabbit)));
+        actual.prey = Math.max(actual.prey, clamp(1 - nearest / this.profile.visionRange));
+      } else if (this.decision.label === "search" || this.decision.label === "chase") {
+        actual.emptySearch += 1;
+      }
+    }
+  }
+
+  evaluateDecision(tick) {
+    if (!this.decision || this.decision.age < 3) return;
+    const actual = this.decision.actual;
+    const observed = {
+      prey: clamp(actual.prey),
+      attack: actual.attackAttempted > 0 ? clamp(actual.attack) : 0,
+      motion: actual.expectedDistance > 0
+        ? clamp(actual.moved / actual.expectedDistance)
+        : 0,
+    };
+    const predicted = this.decision.prediction;
+    const error = {
+      prey: Math.abs(observed.prey - predicted.prey),
+      attack: actual.attackAttempted > 0
+        ? Math.abs(observed.attack - predicted.attack)
+        : 0,
+      motion: Math.abs(observed.motion - predicted.motion),
+    };
+    this.recordPredictionErrors(error, tick);
+    this.xi = clamp(
+      this.xi
+        + Math.min(0.18, actual.emptySearch * 0.006)
+        + Math.min(0.14, actual.blocked * 0.05),
+      0,
+      1.2,
+    );
+  }
+
+  applyLeap(dimension) {
+    if (dimension === "prey") {
+      this.memory.fadePreyMemory(0.44);
+      this.reliability.prey = clamp(this.reliability.prey * 0.72, 0.18, 1);
+      this.weights.memory = clamp(this.weights.memory * 0.9, 0.48, 1.2);
+      this.exploration = clamp(this.exploration + 0.15, 0.08, 0.72);
+      return {
+        title: "Leap: 獲物仮説を組み替え",
+        detail: "古い出現位置を弱め、未探索方向へ探索範囲を広げた",
+      };
+    }
+    if (dimension === "attack") {
+      this.reliability.attack = clamp(this.reliability.attack * 0.7, 0.18, 1);
+      this.attackLeadTicks = this.attackLeadTicks >= 5
+        ? 1.8
+        : this.attackLeadTicks + 0.9;
+      this.attackRangeFactor = clamp(this.attackRangeFactor * 0.88, 0.58, 1);
+      return {
+        title: "Leap: 捕食仮説を組み替え",
+        detail: "突進開始を近づけ、獲物の先読み時間を変更した",
+      };
+    }
+
+    const angle = Math.atan2(
+      this.decision?.direction.y ?? this.vy,
+      this.decision?.direction.x ?? this.vx,
+    ) + Math.PI * 0.58;
+    this.vx = Math.cos(angle) * 1.05;
+    this.vy = Math.sin(angle) * 1.05;
+    this.reliability.motion = clamp(this.reliability.motion * 0.72, 0.18, 1);
+    this.weights.cost = clamp(this.weights.cost + 0.08, 0.42, 1.2);
+    this.exploration = clamp(this.exploration + 0.1, 0.08, 0.72);
+    this.memory.stamp(this.memory.motion, this.x, this.y, 1, 2);
+    return {
+      title: "Leap: 追跡経路を組み替え",
+      detail: "停滞した方向を避け、別の接近角へ切り替えた",
+    };
+  }
+
+  plan(perception, rng, tick) {
+    const visibleTarget = perception.visiblePrey.reduce((nearest, rabbit) => (
+      !nearest || distance(this, rabbit) < distance(this, nearest) ? rabbit : nearest
+    ), null);
+    const currentDirection = normalized(this.vx, this.vy);
+    const candidates = ACTIONS.map((action) => {
+      const target = {
+        x: this.x + action.x * 92,
+        y: this.y + action.y * 92,
+      };
+      const memory = this.memory.sample(target.x, target.y);
+      let prey = memory.prey * (0.62 + this.hunger * 0.78);
+      if (visibleTarget) {
+        const projected = {
+          x: visibleTarget.x + visibleTarget.vx * this.attackLeadTicks,
+          y: visibleTarget.y + visibleTarget.vy * this.attackLeadTicks,
+        };
+        prey = Math.max(
+          prey,
+          clamp(1 - distance(target, projected) / this.profile.visionRange),
+        );
+      }
+
+      const outside = target.x < 32 || target.x > WORLD_WIDTH - 32
+        || target.y < 32 || target.y > WORLD_HEIGHT - 32;
+      const turnCost = action.name === "stay"
+        ? 0.08
+        : (1 - (action.x * currentDirection.x + action.y * currentDirection.y)) * 0.16;
+      const cost = memory.motion * 0.76
+        + (outside ? 0.92 : 0)
+        + turnCost
+        + (action.name === "stay" ? 0 : this.fatigue * 0.26);
+      const explore = (1 - memory.visits)
+        * this.exploration
+        * (action.name === "stay" ? 0.08 : 1);
+      const rest = action.name === "stay" ? this.fatigue * 0.62 : 0;
+      const attackOpportunity = visibleTarget
+        ? clamp(1 - distance(this, visibleTarget) / (this.config.threatAttackRange * 2.4))
+        : memory.prey * 0.14;
+      const total = this.reliability.prey * this.weights.memory * prey * this.weights.prey
+        + this.reliability.attack * attackOpportunity * this.weights.attack
+        + explore
+        + rest
+        - this.reliability.motion * cost * this.weights.cost
+        + rng.range(-0.018, 0.018);
+      return {
+        action,
+        target,
+        memory,
+        prey: clamp(prey),
+        attack: clamp(attackOpportunity),
+        cost: clamp(cost),
+        explore,
+        rest,
+        total,
+      };
+    });
+
+    candidates.sort((a, b) => b.total - a.total);
+    let best = candidates[0];
+    if (!visibleTarget && this.fatigue > 0.76) {
+      best = candidates.find((candidate) => candidate.action.name === "stay") ?? best;
+    }
+
+    let label = "explore";
+    let title = "獲物の未探索域を巡回";
+    let reason = `探索価値 ${best.explore.toFixed(2)} / 移動費 ${best.cost.toFixed(2)}`;
+    if (visibleTarget) {
+      label = "chase";
+      title = `Rabbit ${visibleTarget.id + 1} を追跡`;
+      reason = `距離 ${distance(this, visibleTarget).toFixed(0)} / 獲物価値 ${best.prey.toFixed(2)}`;
+    } else if (this.fatigue > 0.76 && best.action.name === "stay") {
+      label = "rest";
+      title = "探索を止めて回復";
+      reason = `疲労 ${this.fatigue.toFixed(2)} / 獲物視認なし`;
+    } else if (best.memory.prey > 0.12) {
+      label = "search";
+      title = "獲物記憶を探索";
+      reason = `獲物記憶 ${best.memory.prey.toFixed(2)} / 信頼度 ${this.reliability.prey.toFixed(2)}`;
+    }
+
+    const visibleDistance = visibleTarget ? distance(this, visibleTarget) : Infinity;
+    const captureChance = visibleTarget ? this.captureChanceFor(visibleTarget) : 0;
+    const currentPreyIntensity = visibleTarget
+      ? clamp(1 - visibleDistance / this.profile.visionRange)
+      : 0;
+    const preyPrediction = visibleTarget
+      ? clamp(
+        currentPreyIntensity
+          + (this.profile.planInterval * 1.4) / this.profile.visionRange,
+      )
+      : best.memory.prey * 0.62;
+    const attackPrediction = visibleTarget
+      ? best.attack * captureChance
+      : best.memory.prey * 0.08;
+    const motionPrediction = best.action.name === "stay"
+      ? 0.2
+      : clamp(1 - best.cost * 0.48, 0.2, 1);
+    this.decision = {
+      label,
+      title,
+      reason,
+      direction: { x: best.action.x, y: best.action.y },
+      target: best.target,
+      targetId: visibleTarget?.id ?? null,
+      score: best.total,
+      components: {
+        prey: best.prey,
+        attack: best.attack,
+        cost: best.cost,
+        explore: best.explore,
+      },
+      prediction: {
+        prey: preyPrediction,
+        attack: clamp(attackPrediction),
+        motion: motionPrediction,
+      },
+      actual: {
+        prey: visibleTarget
+          ? clamp(1 - distance(this, visibleTarget) / this.profile.visionRange)
+          : 0,
+        attack: 0,
+        attackAttempted: 0,
+        moved: 0,
+        expectedDistance: 0,
+        blocked: 0,
+        emptySearch: 0,
+      },
+      age: 0,
+    };
+    this.targetId = visibleTarget?.id ?? null;
+    this.planTimer = this.profile.planInterval;
+    this.state = label === "explore" ? "wander" : label;
+    if (title !== this.lastLoggedDecision.title || tick - this.lastLoggedDecision.tick >= 60) {
+      this.log(tick, "decision", title, reason);
+      this.lastLoggedDecision = { title, tick };
+    }
+  }
+
+  advanceDecision() {
+    if (!this.decision) return 0;
+    const direction = this.decision.direction;
+    const baseSpeed = this.decision.label === "chase"
+      ? 1.86
+      : this.decision.label === "search"
+        ? 1.42
+        : this.decision.label === "rest"
+          ? 0.08
+          : 1;
+    const maximumSpeed = baseSpeed * clamp(1 - this.fatigue * 0.22, 0.72, 1);
+    const desiredX = direction.x * maximumSpeed;
+    const desiredY = direction.y * maximumSpeed;
+    const steering = capVector(desiredX - this.vx, desiredY - this.vy, 0.105);
+    this.vx += steering.x;
+    this.vy += steering.y;
+    const capped = capVector(this.vx, this.vy, maximumSpeed);
+    this.vx = capped.x;
+    this.vy = capped.y;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.decision.age += 1;
+    this.fatigue = clamp(
+      this.fatigue + Math.max(0, maximumSpeed - 1) ** 2 * 0.00078 - 0.00018,
+    );
+    return maximumSpeed;
+  }
+
+  recordMovement(previous, collision, expectedDistance = 0.12) {
+    const moved = distance(previous, this);
+    this.memory.recordMotion(this.x, this.y, collision.blocked);
+    if (!this.decision) return;
+    this.decision.actual.moved += moved;
+    this.decision.actual.expectedDistance += Math.max(0.12, expectedDistance);
+    if (collision.blocked) this.decision.actual.blocked += 1;
+  }
+
+  captureChanceFor(target) {
+    const away = normalized(target.x - this.x, target.y - this.y);
+    const awaySpeed = target.vx * away.x + target.vy * away.y;
+    const escaping = target.decision?.label === "escape" && awaySpeed >= 0.8;
+    return escaping
+      ? this.config.threatCaptureChanceEscape
+      : this.config.threatCaptureChanceUnaware;
+  }
+
+  recordAttackResult(success) {
+    if (!this.decision) return;
+    this.decision.actual.attackAttempted = 1;
+    this.decision.actual.attack = success ? 1 : 0;
+    this.decision.age = Math.max(this.decision.age, 3);
+  }
+
+  beginAttack(target, tick = 0) {
+    const leadTicks = this.attackLeadTicks;
     this.attackDirection = normalized(
       target.x + target.vx * leadTicks - this.x,
       target.y + target.vy * leadTicks - this.y,
@@ -1098,8 +1611,11 @@ export class Threat {
     this.state = "attack";
     this.targetId = target.id;
     this.attackTicks = this.config.threatAttackTicks;
-    this.memoryTicks = 0;
-    this.lastSeen = { x: target.x, y: target.y };
+    this.planTimer = 0;
+    if (this.decision) {
+      this.decision.actual.attackAttempted = 1;
+      this.decision.prediction.attack = this.captureChanceFor(target);
+    }
 
     const launchSpeed = Math.min(
       this.config.threatAttackSpeed,
@@ -1107,6 +1623,12 @@ export class Threat {
     );
     this.vx = this.attackDirection.x * launchSpeed;
     this.vy = this.attackDirection.y * launchSpeed;
+    this.log(
+      tick,
+      "attack",
+      `Rabbit ${target.id + 1} へ捕食行動`,
+      `先読み ${leadTicks.toFixed(1)} tick / 開始距離 ${distance(this, target).toFixed(1)}`,
+    );
     return {
       type: "attack",
       targetId: target.id,
@@ -1115,7 +1637,8 @@ export class Threat {
     };
   }
 
-  beginRecovery(targetId = this.targetId) {
+  beginRecovery(targetId = this.targetId, tick = 0) {
+    this.recordAttackResult(false);
     const slowed = capVector(this.vx, this.vy, this.config.threatRecoverySpeed);
     this.vx = slowed.x;
     this.vy = slowed.y;
@@ -1124,8 +1647,13 @@ export class Threat {
     this.attackTicks = 0;
     this.attackDirection = null;
     this.recoveryTicks = this.config.threatRecoveryTicks;
-    this.memoryTicks = 0;
-    this.lastSeen = null;
+    this.planTimer = 0;
+    this.log(
+      tick,
+      "attack-miss",
+      "捕食行動が不成立",
+      `${this.config.threatRecoveryTicks} tick の低速回復へ移行`,
+    );
     return {
       type: "attack-miss",
       targetId,
@@ -1134,7 +1662,8 @@ export class Threat {
     };
   }
 
-  advanceAttack(world) {
+  advanceAttack(world, tick = 0) {
+    const previous = { x: this.x, y: this.y };
     const desired = this.attackDirection ?? normalized(this.vx, this.vy);
     const speed = this.config.threatAttackSpeed;
     const steering = capVector(desired.x * speed - this.vx, desired.y * speed - this.vy, 0.34);
@@ -1147,9 +1676,12 @@ export class Threat {
     this.y += this.vy;
     this.attackTicks -= 1;
     const collision = world.constrainEntityDetailed(this, 10);
+    if (this.decision) this.decision.age += 1;
+    this.recordMovement(previous, collision, speed);
+    this.fatigue = clamp(this.fatigue + 0.0024);
     if (!collision.obstacle) return null;
 
-    const recovery = this.beginRecovery();
+    const recovery = this.beginRecovery(this.targetId, tick);
     return {
       ...recovery,
       type: "attack-obstacle",
@@ -1166,11 +1698,10 @@ export class Threat {
     const away = normalized(target.x - this.x, target.y - this.y);
     const awaySpeed = target.vx * away.x + target.vy * away.y;
     const escaping = target.decision?.label === "escape" && awaySpeed >= 0.8;
-    const captureChance = escaping
-      ? this.config.threatCaptureChanceEscape
-      : this.config.threatCaptureChanceUnaware;
+    const captureChance = this.captureChanceFor(target);
 
     if (rng.next() < captureChance) {
+      this.recordAttackResult(true);
       target.die(tick, "捕食行動を受け、離脱できなかった");
       const targetId = target.id;
       this.state = "rest";
@@ -1178,11 +1709,18 @@ export class Threat {
       this.attackTicks = 0;
       this.attackDirection = null;
       this.recoveryTicks = 0;
-      this.memoryTicks = 0;
-      this.lastSeen = null;
       this.restTicks = 150;
+      this.hunger = clamp(this.hunger - 0.46);
+      this.pursuitPressure *= 0.35;
+      this.planTimer = 0;
       this.vx *= 0.24;
       this.vy *= 0.24;
+      this.log(
+        tick,
+        "capture",
+        `Rabbit ${targetId + 1} を捕食`,
+        `予測成功率 ${(captureChance * 100).toFixed(0)}% / 空腹 ${this.hunger.toFixed(2)}`,
+      );
       return {
         type: "capture",
         targetId,
@@ -1192,7 +1730,7 @@ export class Threat {
     }
 
     target.surviveAttack(tick, this);
-    const event = this.beginRecovery(target.id);
+    const event = this.beginRecovery(target.id, tick);
     return {
       ...event,
       type: "attack-escaped",
@@ -1201,18 +1739,23 @@ export class Threat {
     };
   }
 
-  update(world, rabbits, rng) {
+  update(world, rabbits, rng, tick = 0) {
+    this.beginRelationalTick();
     if (this.restTicks > 0) {
       this.restTicks -= 1;
       this.state = "rest";
       this.targetId = null;
-      this.memoryTicks = 0;
-      this.lastSeen = null;
+      this.hunger = clamp(this.hunger + 0.00008);
+      this.fatigue = clamp(this.fatigue - 0.0011);
       this.vx *= 0.94;
       this.vy *= 0.94;
+      const previous = { x: this.x, y: this.y };
       this.x += this.vx;
       this.y += this.vy;
-      world.constrainEntity(this, 10);
+      const collision = world.constrainEntityDetailed(this, 10);
+      if (this.decision) this.decision.age += 1;
+      this.recordMovement(previous, collision, vectorLength(this.vx, this.vy));
+      if (this.restTicks === 0) this.planTimer = 0;
       return;
     }
 
@@ -1220,81 +1763,72 @@ export class Threat {
       this.recoveryTicks -= 1;
       this.state = "recover";
       this.targetId = null;
+      this.hunger = clamp(this.hunger + 0.00016);
+      this.fatigue = clamp(this.fatigue - 0.00072);
       this.vx *= 0.965;
       this.vy *= 0.965;
       const slowed = capVector(this.vx, this.vy, this.config.threatRecoverySpeed);
       this.vx = slowed.x;
       this.vy = slowed.y;
+      const previous = { x: this.x, y: this.y };
       this.x += this.vx;
       this.y += this.vy;
-      world.constrainEntity(this, 10);
+      const collision = world.constrainEntityDetailed(this, 10);
+      if (this.decision) this.decision.age += 1;
+      this.recordMovement(previous, collision, this.config.threatRecoverySpeed);
+      if (this.recoveryTicks === 0) this.planTimer = 0;
       return null;
     }
 
     if (this.state === "attack") {
-      if (this.attackTicks <= 0) return this.beginRecovery();
-      return this.advanceAttack(world);
+      this.hunger = clamp(this.hunger + 0.00022);
+      if (this.attackTicks <= 0) return this.beginRecovery(this.targetId, tick);
+      return this.advanceAttack(world, tick);
     }
 
-    let visibleTarget = null;
-    let nearest = Infinity;
-    for (const rabbit of rabbits) {
-      if (!world.canThreatSee(this, rabbit)) continue;
-      const currentDistance = distance(this, rabbit);
-      if (currentDistance < nearest) {
-        nearest = currentDistance;
-        visibleTarget = rabbit;
+    let perception = world.perceivePredator(this, rabbits);
+    const shouldPlan = this.shouldReplan(perception);
+    this.updateNeeds(perception);
+    if (shouldPlan) {
+      this.evaluateDecision(tick);
+      perception = world.enrichPredatorPerception(this, perception);
+      const stalePrey = this.memory.integrate(perception, this);
+      if (stalePrey > 0.25) {
+        this.xi = clamp(this.xi + stalePrey * 0.26, 0, 1.2);
+        this.log(
+          tick,
+          "mismatch",
+          "獲物記憶と視界が不一致",
+          `古い期待 ${stalePrey.toFixed(2)} を ξ に加算`,
+        );
       }
+      this.maybeLeap(tick);
+      this.plan(perception, rng, tick);
     }
 
-    if (visibleTarget) {
-      this.state = "chase";
-      this.targetId = visibleTarget.id;
-      this.lastSeen = { x: visibleTarget.x, y: visibleTarget.y };
-      this.memoryTicks = 82;
-    } else if (this.memoryTicks > 0 && this.lastSeen) {
-      this.state = "search";
-      this.memoryTicks -= 1;
-    } else {
-      this.state = "wander";
-      this.targetId = null;
-      this.lastSeen = null;
+    this.lastPerception = perception;
+    this.lastSawPrey = perception.visiblePrey.length > 0;
+    this.planTimer -= 1;
+
+    const visibleTarget = perception.visiblePrey.find((rabbit) => rabbit.id === this.targetId)
+      ?? perception.visiblePrey.reduce((nearest, rabbit) => (
+        !nearest || distance(this, rabbit) < distance(this, nearest) ? rabbit : nearest
+      ), null);
+    const attackRange = this.config.threatAttackRange * this.attackRangeFactor;
+    if (visibleTarget && distance(this, visibleTarget) <= attackRange) {
+      const event = this.beginAttack(visibleTarget, tick);
+      return this.advanceAttack(world, tick) ?? event;
     }
 
-    if (visibleTarget && nearest <= this.config.threatAttackRange) {
-      const event = this.beginAttack(visibleTarget);
-      return this.advanceAttack(world) ?? event;
-    }
-
-    let desired = null;
-    let speed = 1.0;
-    if (this.state === "chase" && visibleTarget) {
-      desired = normalized(visibleTarget.x - this.x, visibleTarget.y - this.y);
-      speed = 1.86;
-    } else if (this.state === "search" && this.lastSeen) {
-      desired = normalized(this.lastSeen.x - this.x, this.lastSeen.y - this.y);
-      speed = 1.42;
-      if (distance(this, this.lastSeen) < 14) this.memoryTicks = 0;
-    } else {
-      if (rng.next() < 0.045) {
-        const angle = Math.atan2(this.vy, this.vx) + rng.range(-0.85, 0.85);
-        desired = { x: Math.cos(angle), y: Math.sin(angle) };
-      } else {
-        desired = normalized(this.vx, this.vy);
-      }
-    }
-
-    const steering = capVector(desired.x * speed - this.vx, desired.y * speed - this.vy, 0.105);
-    this.vx += steering.x;
-    this.vy += steering.y;
-    const capped = capVector(this.vx, this.vy, speed);
-    this.vx = capped.x;
-    this.vy = capped.y;
-    this.x += this.vx;
-    this.y += this.vy;
-    world.constrainEntity(this, 10);
+    const previous = { x: this.x, y: this.y };
+    const expectedDistance = this.advanceDecision();
+    const collision = world.constrainEntityDetailed(this, 10);
+    this.recordMovement(previous, collision, expectedDistance);
+    return null;
   }
 }
+
+export { Predator as Threat };
 
 export class Simulation {
   constructor({ seed = 2401, config = CONFIG } = {}) {
@@ -1343,7 +1877,12 @@ export class Simulation {
         break;
       }
     }
-    this.threat = new Threat(threatPosition.x, threatPosition.y, this.rng, this.config);
+    this.predator = new Predator(threatPosition.x, threatPosition.y, this.rng, this.config);
+    this.threat = this.predator;
+  }
+
+  relationalAgents() {
+    return [...this.rabbits, this.predator];
   }
 
   emitObserver(event) {
@@ -1359,7 +1898,7 @@ export class Simulation {
     this.tick += 1;
     this.world.update(this.rng, this.tick, (event) => this.emitObserver(event));
     const alive = this.rabbits.filter((rabbit) => rabbit.alive);
-    const threatEvent = this.threat.update(this.world, alive, this.rng);
+    const threatEvent = this.threat.update(this.world, alive, this.rng, this.tick);
     if (threatEvent) this.emitObserver({ tick: this.tick, ...threatEvent });
 
     const attackEvent = this.threat.resolveAttack(this.rabbits, this.rng, this.tick);
@@ -1413,7 +1952,8 @@ export class Simulation {
       living: this.rabbits.filter((rabbit) => rabbit.alive).length,
       dormant: this.world.resources.filter((resource) => resource.dormant).length,
       relocations: this.world.resources.reduce((sum, resource) => sum + resource.relocations, 0),
-      leaps: this.rabbits.reduce((sum, rabbit) => sum + rabbit.leapCount, 0),
+      leaps: this.relationalAgents().reduce((sum, agent) => sum + agent.leapCount, 0),
+      predatorLeaps: this.threat.leapCount,
       threatState: this.threat.state,
     };
   }
@@ -1436,6 +1976,9 @@ export class Simulation {
         x: round(this.threat.x),
         y: round(this.threat.y),
         state: this.threat.state,
+        hunger: round(this.threat.hunger),
+        leaps: this.threat.leapCount,
+        decision: this.threat.decision?.label ?? null,
       },
       obstacles: this.world.obstacles.map((obstacle) => ({
         id: obstacle.id,
