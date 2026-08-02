@@ -5,6 +5,7 @@ export const CONFIG = Object.freeze({
   rabbitCount: 5,
   grassCount: 13,
   waterCount: 3,
+  obstacleCount: 7,
   memoryColumns: 24,
   memoryRows: 16,
   visionRange: 205,
@@ -144,6 +145,16 @@ export class Resource {
   }
 }
 
+export class TerrainObstacle {
+  constructor({ id, x, y, radius }) {
+    this.id = id;
+    this.kind = "rock";
+    this.x = x;
+    this.y = y;
+    this.radius = radius;
+  }
+}
+
 export class MemoryField {
   constructor(columns = CONFIG.memoryColumns, rows = CONFIG.memoryRows) {
     this.columns = columns;
@@ -229,13 +240,18 @@ export class MemoryField {
       this.cover[index] = lerp(this.cover[index], cell.cover, cell.cover > 0.04 ? 0.65 : 0.2);
     }
 
-    for (const resource of perception.visibleResources) {
+    for (const resource of perception.visibleResources ?? []) {
       if (resource.kind === "grass") {
         this.stamp(this.food, resource.x, resource.y, resource.amount, 2);
         this.stamp(this.cover, resource.x, resource.y, resource.cover, 2);
       } else {
         this.stamp(this.water, resource.x, resource.y, resource.amount, 2);
       }
+    }
+
+    for (const obstacle of perception.visibleObstacles ?? []) {
+      const radiusInCells = Math.max(1, Math.ceil(obstacle.radius / 40));
+      this.stamp(this.motion, obstacle.x, obstacle.y, 1, radiusInCells);
     }
 
     if (perception.visibleThreat) {
@@ -284,51 +300,102 @@ export class MemoryField {
 export class World {
   constructor(rng, config = CONFIG) {
     this.config = config;
+    this.obstacles = [];
     this.resources = [];
+    this.createObstacles(rng);
     this.createResources(rng);
+  }
+
+  createObstacles(rng) {
+    for (let index = 0; index < this.config.obstacleCount; index += 1) {
+      const radius = rng.range(28, 48);
+      const position = this.findObstaclePosition(rng, radius);
+      this.obstacles.push(new TerrainObstacle({
+        id: `R${index + 1}`,
+        x: position.x,
+        y: position.y,
+        radius,
+      }));
+    }
+  }
+
+  findObstaclePosition(rng, radius) {
+    const edge = this.config.worldMargin + radius + 24;
+    let best = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+    let bestGap = -Infinity;
+    for (let attempt = 0; attempt < 160; attempt += 1) {
+      const candidate = {
+        x: rng.range(edge, WORLD_WIDTH - edge),
+        y: rng.range(edge, WORLD_HEIGHT - edge),
+      };
+      const gap = this.obstacles.reduce(
+        (minimum, obstacle) => Math.min(
+          minimum,
+          distance(candidate, obstacle) - radius - obstacle.radius,
+        ),
+        Infinity,
+      );
+      if (gap > bestGap) {
+        best = candidate;
+        bestGap = gap;
+      }
+      if (gap >= 38) return candidate;
+    }
+    return best;
   }
 
   createResources(rng) {
     for (let index = 0; index < this.config.grassCount; index += 1) {
-      const position = this.findOpenPosition(rng, 58);
+      const radius = rng.range(24, 38);
+      const position = this.findOpenPosition(rng, 58, null, radius);
       this.resources.push(new Resource({
         id: `G${index + 1}`,
         kind: "grass",
         x: position.x,
         y: position.y,
-        radius: rng.range(24, 38),
+        radius,
         amount: rng.range(0.52, 0.88),
         cover: rng.range(0.5, 1),
       }));
     }
 
     for (let index = 0; index < this.config.waterCount; index += 1) {
-      const position = this.findOpenPosition(rng, 100);
+      const radius = rng.range(28, 42);
+      const position = this.findOpenPosition(rng, 100, null, radius);
       this.resources.push(new Resource({
         id: `W${index + 1}`,
         kind: "water",
         x: position.x,
         y: position.y,
-        radius: rng.range(28, 42),
+        radius,
         amount: rng.range(0.58, 0.86),
       }));
     }
   }
 
-  findOpenPosition(rng, minimumDistance = 60, previousPosition = null) {
+  findOpenPosition(rng, minimumDistance = 60, previousPosition = null, radius = 0) {
     let candidate = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
-    for (let attempt = 0; attempt < 96; attempt += 1) {
+    let terrainSafeFallback = null;
+    for (let attempt = 0; attempt < 160; attempt += 1) {
       candidate = {
         x: rng.range(64, WORLD_WIDTH - 64),
         y: rng.range(64, WORLD_HEIGHT - 64),
       };
+      const awayFromObstacles = this.isPositionOpen(candidate, radius, 12);
+      if (awayFromObstacles && terrainSafeFallback === null) terrainSafeFallback = candidate;
       const awayFromResources = this.resources.every(
         (resource) => resource.dormant || distance(candidate, resource) >= minimumDistance,
       );
       const awayFromPrevious = !previousPosition || distance(candidate, previousPosition) >= 150;
-      if (awayFromResources && awayFromPrevious) return candidate;
+      if (awayFromObstacles && awayFromResources && awayFromPrevious) return candidate;
     }
-    return candidate;
+    return terrainSafeFallback ?? candidate;
+  }
+
+  isPositionOpen(position, radius = 0, clearance = 0) {
+    return this.obstacles.every(
+      (obstacle) => distance(position, obstacle) >= obstacle.radius + radius + clearance,
+    );
   }
 
   activeResources(kind = null) {
@@ -360,21 +427,38 @@ export class World {
     return false;
   }
 
+  lineBlockedByObstacle(start, end, ignoredObstacleId = null) {
+    for (const obstacle of this.obstacles) {
+      if (obstacle.id === ignoredObstacleId) continue;
+      if (pointToSegmentDistance(obstacle, start, end) < obstacle.radius) return true;
+    }
+    return false;
+  }
+
+  lineBlocked(start, end) {
+    return this.lineBlockedByObstacle(start, end) || this.lineBlockedByCover(start, end);
+  }
+
   canThreatSee(threat, rabbit) {
     if (!rabbit.alive) return false;
     const cover = this.coverAt(rabbit.x, rabbit.y);
     const range = this.config.threatVisionRange * (cover > 0.35 ? 0.5 : 1);
-    return distance(threat, rabbit) <= range && !this.lineBlockedByCover(threat, rabbit);
+    return distance(threat, rabbit) <= range && !this.lineBlocked(threat, rabbit);
   }
 
   perceiveRabbit(rabbit, threat, rng) {
     const visibleResources = this.activeResources().filter(
       (resource) => distance(rabbit, resource) <= this.config.visionRange
-        && !this.lineBlockedByCover(rabbit, resource),
+        && !this.lineBlocked(rabbit, resource),
+    );
+    const visibleObstacles = this.obstacles.filter(
+      (obstacle) => Math.max(0, distance(rabbit, obstacle) - obstacle.radius) <= this.config.visionRange
+        && !this.lineBlockedByObstacle(rabbit, obstacle, obstacle.id)
+        && !this.lineBlockedByCover(rabbit, obstacle),
     );
     const threatDistance = distance(rabbit, threat);
     const seesThreat = threatDistance <= this.config.visionRange
-      && !this.lineBlockedByCover(rabbit, threat);
+      && !this.lineBlocked(rabbit, threat);
     let visibleThreat = null;
     let heardThreat = null;
 
@@ -399,6 +483,7 @@ export class World {
 
     return {
       visibleResources,
+      visibleObstacles,
       visibleThreat,
       heardThreat,
       insideCover: this.coverAt(rabbit.x, rabbit.y),
@@ -412,7 +497,7 @@ export class World {
       for (let column = 0; column < rabbit.memory.columns; column += 1) {
         const center = rabbit.memory.cellCenter(column, row);
         if (distance(rabbit, center) > this.config.visionRange) continue;
-        if (this.lineBlockedByCover(rabbit, center)) continue;
+        if (this.lineBlocked(rabbit, center)) continue;
 
         let food = 0;
         let water = 0;
@@ -439,24 +524,61 @@ export class World {
     return { ...perception, observedCells };
   }
 
-  constrainEntity(entity, radius = 7) {
+  constrainEntityDetailed(entity, radius = 7) {
     const minimumX = this.config.worldMargin + radius;
     const maximumX = WORLD_WIDTH - this.config.worldMargin - radius;
     const minimumY = this.config.worldMargin + radius;
     const maximumY = WORLD_HEIGHT - this.config.worldMargin - radius;
     let blocked = false;
+    let boundary = false;
+    let hitObstacle = null;
 
     if (entity.x < minimumX || entity.x > maximumX) {
       entity.x = clamp(entity.x, minimumX, maximumX);
       entity.vx *= -0.72;
       blocked = true;
+      boundary = true;
     }
     if (entity.y < minimumY || entity.y > maximumY) {
       entity.y = clamp(entity.y, minimumY, maximumY);
       entity.vy *= -0.72;
       blocked = true;
+      boundary = true;
     }
-    return blocked;
+
+    for (const obstacle of this.obstacles) {
+      const dx = entity.x - obstacle.x;
+      const dy = entity.y - obstacle.y;
+      const currentDistance = Math.hypot(dx, dy);
+      const minimumDistance = obstacle.radius + radius;
+      if (currentDistance >= minimumDistance) continue;
+
+      let normalX;
+      let normalY;
+      if (currentDistance > 0.0001) {
+        normalX = dx / currentDistance;
+        normalY = dy / currentDistance;
+      } else {
+        const motionSpeed = vectorLength(entity.vx, entity.vy);
+        normalX = motionSpeed > 0.0001 ? -entity.vx / motionSpeed : 1;
+        normalY = motionSpeed > 0.0001 ? -entity.vy / motionSpeed : 0;
+      }
+
+      entity.x = obstacle.x + normalX * minimumDistance;
+      entity.y = obstacle.y + normalY * minimumDistance;
+      const inwardSpeed = entity.vx * normalX + entity.vy * normalY;
+      if (inwardSpeed < 0) {
+        entity.vx -= inwardSpeed * normalX;
+        entity.vy -= inwardSpeed * normalY;
+      }
+      blocked = true;
+      hitObstacle ??= obstacle;
+    }
+    return { blocked, boundary, obstacle: hitObstacle };
+  }
+
+  constrainEntity(entity, radius = 7) {
+    return this.constrainEntityDetailed(entity, radius).blocked;
   }
 
   beginDormancy(resource, rng, tick, emit) {
@@ -480,7 +602,12 @@ export class World {
       if (!resource.dormant) continue;
       resource.dormantFor -= 1;
       if (resource.dormantFor > 0) continue;
-      const next = this.findOpenPosition(rng, resource.kind === "water" ? 105 : 62, resource.previousPosition);
+      const next = this.findOpenPosition(
+        rng,
+        resource.kind === "water" ? 105 : 62,
+        resource.previousPosition,
+        resource.radius,
+      );
       resource.x = next.x;
       resource.y = next.y;
       resource.amount = rng.range(0.75, 1);
@@ -1007,6 +1134,30 @@ export class Threat {
     };
   }
 
+  advanceAttack(world) {
+    const desired = this.attackDirection ?? normalized(this.vx, this.vy);
+    const speed = this.config.threatAttackSpeed;
+    const steering = capVector(desired.x * speed - this.vx, desired.y * speed - this.vy, 0.34);
+    this.vx += steering.x;
+    this.vy += steering.y;
+    const capped = capVector(this.vx, this.vy, speed);
+    this.vx = capped.x;
+    this.vy = capped.y;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.attackTicks -= 1;
+    const collision = world.constrainEntityDetailed(this, 10);
+    if (!collision.obstacle) return null;
+
+    const recovery = this.beginRecovery();
+    return {
+      ...recovery,
+      type: "attack-obstacle",
+      title: "捕食行動が地形に阻まれた",
+      detail: `${collision.obstacle.id} へ衝突し、低速回復へ移る`,
+    };
+  }
+
   resolveAttack(rabbits, rng, tick) {
     if (this.state !== "attack") return null;
     const target = rabbits.find((rabbit) => rabbit.id === this.targetId && rabbit.alive);
@@ -1082,19 +1233,7 @@ export class Threat {
 
     if (this.state === "attack") {
       if (this.attackTicks <= 0) return this.beginRecovery();
-      const desired = this.attackDirection ?? normalized(this.vx, this.vy);
-      const speed = this.config.threatAttackSpeed;
-      const steering = capVector(desired.x * speed - this.vx, desired.y * speed - this.vy, 0.34);
-      this.vx += steering.x;
-      this.vy += steering.y;
-      const capped = capVector(this.vx, this.vy, speed);
-      this.vx = capped.x;
-      this.vy = capped.y;
-      this.x += this.vx;
-      this.y += this.vy;
-      this.attackTicks -= 1;
-      world.constrainEntity(this, 10);
-      return null;
+      return this.advanceAttack(world);
     }
 
     let visibleTarget = null;
@@ -1124,22 +1263,7 @@ export class Threat {
 
     if (visibleTarget && nearest <= this.config.threatAttackRange) {
       const event = this.beginAttack(visibleTarget);
-      const speed = this.config.threatAttackSpeed;
-      const steering = capVector(
-        this.attackDirection.x * speed - this.vx,
-        this.attackDirection.y * speed - this.vy,
-        0.34,
-      );
-      this.vx += steering.x;
-      this.vy += steering.y;
-      const capped = capVector(this.vx, this.vy, speed);
-      this.vx = capped.x;
-      this.vy = capped.y;
-      this.x += this.vx;
-      this.y += this.vy;
-      this.attackTicks -= 1;
-      world.constrainEntity(this, 10);
-      return event;
+      return this.advanceAttack(world) ?? event;
     }
 
     let desired = null;
@@ -1200,17 +1324,20 @@ export class Simulation {
           x: this.rng.range(120, WORLD_WIDTH - 120),
           y: this.rng.range(100, WORLD_HEIGHT - 100),
         };
-        if (this.rabbits.every((rabbit) => distance(candidate, rabbit) > 54)) {
+        if (
+          this.world.isPositionOpen(candidate, 7, 12)
+          && this.rabbits.every((rabbit) => distance(candidate, rabbit) > 54)
+        ) {
           position = candidate;
           break;
         }
       }
-      position ??= { x: WORLD_WIDTH / 2 + id * 22, y: WORLD_HEIGHT / 2 };
+      position ??= this.world.findOpenPosition(this.rng, 42, null, 7);
       this.rabbits.push(new Rabbit(id, position.x, position.y, this.rng, this.config));
     }
-    let threatPosition = this.world.findOpenPosition(this.rng, 80);
+    let threatPosition = this.world.findOpenPosition(this.rng, 80, null, 10);
     for (let attempt = 0; attempt < 24; attempt += 1) {
-      const candidate = this.world.findOpenPosition(this.rng, 80);
+      const candidate = this.world.findOpenPosition(this.rng, 80, null, 10);
       if (this.rabbits.every((rabbit) => distance(candidate, rabbit) > 170)) {
         threatPosition = candidate;
         break;
@@ -1310,6 +1437,12 @@ export class Simulation {
         y: round(this.threat.y),
         state: this.threat.state,
       },
+      obstacles: this.world.obstacles.map((obstacle) => ({
+        id: obstacle.id,
+        x: round(obstacle.x),
+        y: round(obstacle.y),
+        radius: round(obstacle.radius),
+      })),
       resources: this.world.resources.map((resource) => ({
         id: resource.id,
         x: round(resource.x),

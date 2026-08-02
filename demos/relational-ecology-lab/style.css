@@ -419,6 +419,11 @@ h1 {
 .legend-rabbit { background: #eef4e8; }
 .legend-grass { background: var(--moss); }
 .legend-water { background: var(--water); }
+.legend-rock {
+  border: 1px solid #828c86;
+  border-radius: 35% !important;
+  background: #46504b;
+}
 .legend-threat { background: var(--danger); }
 .legend-dormant { border: 1px dashed #6d776f; background: transparent; }
 

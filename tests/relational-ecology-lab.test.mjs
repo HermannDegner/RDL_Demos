@@ -5,9 +5,11 @@ import {
   CONFIG,
   SeededRandom,
   Simulation,
+  TerrainObstacle,
   Threat,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  distance,
 } from "../demos/relational-ecology-lab/core.mjs";
 
 test("同じ seed と fixed tick は同じ生態系状態を再現する", () => {
@@ -105,6 +107,80 @@ test("遠方の脅威と資源は個体の知覚へ入らない", () => {
   assert.equal(perception.visibleResources.length, 0);
 });
 
+test("岩は視線を遮り、視認した個体の移動場だけへ記録される", () => {
+  const simulation = new Simulation({ seed: 131 });
+  const observingRabbit = simulation.rabbits[0];
+  const distantRabbit = simulation.rabbits[1];
+  const rock = new TerrainObstacle({ id: "R-test", x: 200, y: 100, radius: 32 });
+  simulation.world.obstacles = [rock];
+  for (const resource of simulation.world.resources) resource.dormant = true;
+
+  observingRabbit.x = 100;
+  observingRabbit.y = 100;
+  distantRabbit.x = 760;
+  distantRabbit.y = 520;
+  simulation.threat.x = 300;
+  simulation.threat.y = 100;
+
+  const perception = simulation.world.perceiveRabbit(
+    observingRabbit,
+    simulation.threat,
+    simulation.rng,
+  );
+  const distantPerception = simulation.world.perceiveRabbit(
+    distantRabbit,
+    simulation.threat,
+    simulation.rng,
+  );
+
+  assert.equal(perception.visibleThreat, null);
+  assert.deepEqual(perception.visibleObstacles.map((obstacle) => obstacle.id), ["R-test"]);
+  assert.equal(distantPerception.visibleObstacles.length, 0);
+
+  observingRabbit.memory.integrate(perception, observingRabbit);
+  distantRabbit.memory.integrate(distantPerception, distantRabbit);
+  const rockCell = observingRabbit.memory.indexAt(rock.x, rock.y);
+  assert.ok(observingRabbit.memory.motion[rockCell] > 0.5);
+  assert.equal(distantRabbit.memory.motion[rockCell], 0);
+});
+
+test("岩との衝突は個体を外へ戻し、接線方向の移動を残す", () => {
+  const simulation = new Simulation({ seed: 132 });
+  const rock = new TerrainObstacle({ id: "R-test", x: 100, y: 100, radius: 30 });
+  const entity = { x: 125, y: 115, vx: -1, vy: 1 };
+  simulation.world.obstacles = [rock];
+
+  const collision = simulation.world.constrainEntityDetailed(entity, 7);
+  const normal = {
+    x: (entity.x - rock.x) / distance(entity, rock),
+    y: (entity.y - rock.y) / distance(entity, rock),
+  };
+
+  assert.equal(collision.blocked, true);
+  assert.equal(collision.obstacle.id, "R-test");
+  assert.ok(distance(entity, rock) >= rock.radius + 7 - 1e-9);
+  assert.ok(entity.vx * normal.x + entity.vy * normal.y >= -1e-9);
+  assert.ok(Math.hypot(entity.vx, entity.vy) > 0.1);
+});
+
+test("資源は生成時と再生時のどちらも岩の内部へ配置されない", () => {
+  const simulation = new Simulation({ seed: 133 });
+  const resource = simulation.world.resources[0];
+
+  const assertTerrainClear = (candidate) => {
+    for (const obstacle of simulation.world.obstacles) {
+      assert.ok(distance(candidate, obstacle) >= candidate.radius + obstacle.radius + 12 - 1e-9);
+    }
+  };
+
+  for (const candidate of simulation.world.resources) assertTerrainClear(candidate);
+  resource.dormant = true;
+  resource.dormantFor = 1;
+  resource.previousPosition = { x: resource.x, y: resource.y };
+  simulation.world.update(simulation.rng, 1, () => {});
+  assertTerrainClear(resource);
+});
+
 test("境界は閉じており、個体と脅威は wrap しない", () => {
   const simulation = new Simulation({ seed: 120 });
   simulation.step(2400);
@@ -159,6 +235,29 @@ test("捕食者は接近後に加速行動へ入り、終了後は低速で回�
 
   assert.equal(miss.type, "attack-miss");
   assert.equal(threat.state, "recover");
+  assert.ok(Math.hypot(threat.vx, threat.vy) <= CONFIG.threatRecoverySpeed);
+});
+
+test("捕食ダッシュが岩へ衝突すると、その場で攻撃を終えて回復へ移る", () => {
+  const simulation = new Simulation({ seed: 818 });
+  const threat = simulation.threat;
+  simulation.world.obstacles = [
+    new TerrainObstacle({ id: "R-test", x: 128, y: 100, radius: 15 }),
+  ];
+  threat.x = 100;
+  threat.y = 100;
+  threat.vx = 3;
+  threat.vy = 0;
+  threat.state = "attack";
+  threat.targetId = simulation.rabbits[0].id;
+  threat.attackTicks = 5;
+  threat.attackDirection = { x: 1, y: 0 };
+
+  const event = threat.update(simulation.world, simulation.rabbits, simulation.rng);
+
+  assert.equal(event.type, "attack-obstacle");
+  assert.equal(threat.state, "recover");
+  assert.equal(threat.attackTicks, 0);
   assert.ok(Math.hypot(threat.vx, threat.vy) <= CONFIG.threatRecoverySpeed);
 });
 
