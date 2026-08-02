@@ -19,10 +19,10 @@ RDL（関係力学言語 / Relational Dynamics Language）をベースにした�
 [RDL Living Field](demos/relational-ecology-lab/) は、既存デモで分かれていた要素を
 一つの因果ループへ統合した発展実験。
 
-- 連続座標上を動く5体のRabbitと、視覚を遮蔽される能動的脅威
+- 共通`RelationalAgent`型で動く5体のRabbitと1体のPredator
 - 草・水・遮蔽と、摂取 → 枯渇 → 休眠 → 別地点再生の資源循環
 - 制限された視覚と、方向が曖昧な音
-- 個体ごとに分離された食・水・危険・移動の予測場
+- Rabbitの食・水・危険記憶と、Predatorの獲物・捕食結果記憶
 - 予測差 `E` の `H_vec` への蓄積と、実効閾値を越えたときの `Leap`
 - fixed tick と seeded RNG による再現可能な実行
 

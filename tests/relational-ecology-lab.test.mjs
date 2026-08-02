@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   CONFIG,
+  PredatorProfile,
+  RelationalAgent,
+  RabbitProfile,
   SeededRandom,
   Simulation,
   TerrainObstacle,
@@ -37,6 +40,105 @@ test("個体の記憶配列は共有されない", () => {
   assert.notStrictEqual(first.food, second.food);
   first.food[0] = 0.91;
   assert.equal(second.food[0], 0);
+});
+
+test("Rabbit と捕食者は同じ RelationalAgent 文法を種別Profileで使う", () => {
+  const simulation = new Simulation({ seed: 42 });
+  const rabbit = simulation.rabbits[0];
+  const predator = simulation.threat;
+
+  assert.ok(rabbit instanceof RelationalAgent);
+  assert.ok(predator instanceof RelationalAgent);
+  assert.ok(rabbit.profile instanceof RabbitProfile);
+  assert.ok(predator.profile instanceof PredatorProfile);
+  assert.deepEqual(rabbit.profile.errorDimensions, ["resource", "danger", "motion"]);
+  assert.deepEqual(predator.profile.errorDimensions, ["prey", "attack", "motion"]);
+  assert.notStrictEqual(rabbit.memory.prey, predator.memory.prey);
+  assert.deepEqual(
+    simulation.relationalAgents().map((agent) => agent.profile.kind),
+    ["rabbit", "rabbit", "rabbit", "rabbit", "rabbit", "predator"],
+  );
+});
+
+test("捕食者は視界内かつ遮蔽されていない獲物と地形だけを内部場へ統合する", () => {
+  const simulation = new Simulation({ seed: 43 });
+  const predator = simulation.threat;
+  const visibleRabbit = simulation.rabbits[0];
+  const hiddenRabbit = simulation.rabbits[1];
+  const rock = new TerrainObstacle({ id: "R-test", x: 200, y: 100, radius: 30 });
+  simulation.world.obstacles = [rock];
+  predator.x = 100;
+  predator.y = 100;
+  visibleRabbit.x = 100;
+  visibleRabbit.y = 190;
+  hiddenRabbit.x = 300;
+  hiddenRabbit.y = 100;
+  for (const rabbit of simulation.rabbits.slice(2)) {
+    rabbit.x = 800;
+    rabbit.y = 540;
+  }
+
+  let perception = simulation.world.perceivePredator(predator, simulation.rabbits);
+  assert.deepEqual(perception.visiblePrey.map((rabbit) => rabbit.id), [visibleRabbit.id]);
+  assert.deepEqual(perception.visibleObstacles.map((obstacle) => obstacle.id), ["R-test"]);
+
+  perception = simulation.world.enrichPredatorPerception(predator, perception);
+  predator.memory.integrate(perception, predator);
+  const visibleCell = predator.memory.indexAt(visibleRabbit.x, visibleRabbit.y);
+  const hiddenCell = predator.memory.indexAt(hiddenRabbit.x, hiddenRabbit.y);
+  const rockCell = predator.memory.indexAt(rock.x, rock.y);
+  assert.ok(predator.memory.prey[visibleCell] > 0.5);
+  assert.equal(predator.memory.prey[hiddenCell], 0);
+  assert.ok(predator.memory.motion[rockCell] > 0.5);
+});
+
+test("捕食失敗は捕食者の attack 誤差へ入り、Leapで狙い方を組み替える", () => {
+  const simulation = new Simulation({ seed: 44 });
+  const predator = simulation.threat;
+  predator.decision = {
+    direction: { x: 1, y: 0 },
+    prediction: { prey: 0.2, attack: 0.82, motion: 0.7 },
+    actual: {
+      prey: 0.2,
+      attack: 0,
+      attackAttempted: 1,
+      moved: 7,
+      expectedDistance: 10,
+      blocked: 0,
+      emptySearch: 0,
+    },
+    age: 4,
+  };
+
+  predator.evaluateDecision(10);
+  assert.ok(predator.H.attack > predator.H.prey);
+  assert.ok(predator.H.attack > predator.H.motion);
+
+  predator.H.attack = predator.thetaEffective + 0.2;
+  const leadBefore = predator.attackLeadTicks;
+  const rangeBefore = predator.attackRangeFactor;
+  const leap = predator.maybeLeap(11);
+
+  assert.equal(leap.dimension, "attack");
+  assert.ok(predator.attackLeadTicks > leadBefore);
+  assert.ok(predator.attackRangeFactor < rangeBefore);
+  assert.equal(predator.events[0].type, "leap");
+});
+
+test("獲物を見失った捕食者は全知追跡せず、自身の獲物記憶を探索する", () => {
+  const simulation = new Simulation({ seed: 45 });
+  const predator = simulation.threat;
+  predator.x = 200;
+  predator.y = 200;
+  predator.vx = 1;
+  predator.vy = 0;
+  predator.memory.stamp(predator.memory.prey, 292, 200, 1, 1);
+
+  predator.plan({ visiblePrey: [], visibleObstacles: [], observedCells: [] }, simulation.rng, 1);
+
+  assert.equal(predator.decision.label, "search");
+  assert.ok(predator.decision.direction.x > 0.5);
+  assert.equal(predator.targetId, null);
 });
 
 test("資源は枯渇後に休眠し、同じ場所へ即時復活せず別地点で再生する", () => {

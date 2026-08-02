@@ -19,6 +19,7 @@ const elements = {
   focus: document.querySelector("#focus-select"),
   overlay: document.querySelector("#overlay-select"),
   fieldMode: document.querySelector("#field-mode"),
+  focusKind: document.querySelector("#focus-kind"),
   focusId: document.querySelector("#focus-id"),
   focusStatus: document.querySelector("#focus-status"),
   decisionLabel: document.querySelector("#decision-label"),
@@ -37,53 +38,56 @@ const elements = {
   metricDormant: document.querySelector("#metric-dormant"),
   metricRelocations: document.querySelector("#metric-relocations"),
   metricLeaps: document.querySelector("#metric-leaps"),
+  needsHeading: document.querySelector("#needs-heading"),
 };
 
-const needMeters = {
-  hunger: {
+const needMeters = [
+  {
+    label: document.querySelector("#need-1-label"),
     value: document.querySelector("#hunger-value"),
     bar: document.querySelector("#hunger-bar"),
   },
-  thirst: {
+  {
+    label: document.querySelector("#need-2-label"),
     value: document.querySelector("#thirst-value"),
     bar: document.querySelector("#thirst-bar"),
   },
-  fear: {
+  {
+    label: document.querySelector("#need-3-label"),
     value: document.querySelector("#fear-value"),
     bar: document.querySelector("#fear-bar"),
   },
-  fatigue: {
+  {
+    label: document.querySelector("#need-4-label"),
     value: document.querySelector("#fatigue-value"),
     bar: document.querySelector("#fatigue-bar"),
   },
-};
+];
 
-const hMeters = {
-  resource: {
+const hMeters = [
+  {
+    label: document.querySelector("#h-1-label"),
     value: document.querySelector("#h-resource-value"),
     bar: document.querySelector("#h-resource-bar"),
   },
-  danger: {
+  {
+    label: document.querySelector("#h-2-label"),
     value: document.querySelector("#h-danger-value"),
     bar: document.querySelector("#h-danger-bar"),
   },
-  motion: {
+  {
+    label: document.querySelector("#h-3-label"),
     value: document.querySelector("#h-motion-value"),
     bar: document.querySelector("#h-motion-bar"),
   },
-};
+];
 
 const rabbitColors = ["#eef5e8", "#cce8df", "#f1dfb7", "#d9cef0", "#bdd7ed"];
-const overlayLabels = {
-  actual: "観測: 物理環境",
-  resource: "内部場: 食・水記憶",
-  danger: "内部場: 危険記憶",
-  motion: "内部場: 移動誤差",
-  visits: "内部場: 探索履歴",
-};
 const decisionLabels = {
   explore: "explore",
   escape: "escape",
+  chase: "chase",
+  search: "search",
   water: "hydrate",
   food: "forage",
   rest: "rest",
@@ -92,7 +96,7 @@ const decisionLabels = {
 
 const query = new URLSearchParams(window.location.search);
 let simulation = new Simulation({ seed: normalizeSeed(query.get("seed") ?? 2401) });
-let focusedRabbitId = 0;
+let focusedAgentKey = simulation.rabbits[0].focusKey;
 let running = true;
 let speed = 1;
 let lastFrame = performance.now();
@@ -114,33 +118,49 @@ function configureCanvas() {
 
 function buildFocusOptions() {
   elements.focus.replaceChildren();
-  for (const rabbit of simulation.rabbits) {
+  for (const agent of simulation.relationalAgents()) {
     const option = document.createElement("option");
-    option.value = String(rabbit.id);
-    option.textContent = `Rabbit ${rabbit.id + 1}`;
+    option.value = agent.focusKey;
+    option.textContent = agent.profile.kind === "rabbit"
+      ? `Rabbit ${agent.id + 1}`
+      : "Predator 1";
     elements.focus.append(option);
   }
-  elements.focus.value = String(focusedRabbitId);
+  elements.focus.value = focusedAgentKey;
 }
 
-function focusRabbit() {
-  return simulation.rabbits.find((rabbit) => rabbit.id === focusedRabbitId)
+function focusAgent() {
+  return simulation.relationalAgents().find((agent) => agent.focusKey === focusedAgentKey)
     ?? simulation.rabbits[0];
 }
 
-function setFocusedRabbit(id) {
-  const next = simulation.rabbits.find((rabbit) => rabbit.id === Number(id));
+function rebuildOverlayOptions(agent, preferred = elements.overlay.value) {
+  elements.overlay.replaceChildren();
+  for (const overlay of agent.profile.overlays) {
+    const option = document.createElement("option");
+    option.value = overlay.value;
+    option.textContent = overlay.option;
+    elements.overlay.append(option);
+  }
+  const available = agent.profile.overlays.some((overlay) => overlay.value === preferred);
+  elements.overlay.value = available ? preferred : "actual";
+}
+
+function setFocusedAgent(key) {
+  const next = simulation.relationalAgents().find((agent) => agent.focusKey === key);
   if (!next) return;
-  focusedRabbitId = next.id;
-  elements.focus.value = String(focusedRabbitId);
+  focusedAgentKey = next.focusKey;
+  elements.focus.value = focusedAgentKey;
+  rebuildOverlayOptions(next);
   eventSignature = "";
   lastUiTick = -1;
   updateInterface(true);
 }
 
 function setMeter(meter, value, maximum = 1) {
-  const normalized = clamp(value / maximum);
-  meter.value.textContent = value.toFixed(2);
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const normalized = clamp(safeValue / maximum);
+  meter.value.textContent = safeValue.toFixed(2);
   meter.bar.style.width = `${(normalized * 100).toFixed(1)}%`;
 }
 
@@ -148,8 +168,11 @@ function rebuildSimulation() {
   const seed = normalizeSeed(elements.seed.value);
   simulation = new Simulation({ seed });
   elements.seed.value = String(seed);
-  focusedRabbitId = clamp(focusedRabbitId, 0, CONFIG.rabbitCount - 1);
+  if (!simulation.relationalAgents().some((agent) => agent.focusKey === focusedAgentKey)) {
+    focusedAgentKey = simulation.rabbits[0].focusKey;
+  }
   buildFocusOptions();
+  rebuildOverlayOptions(focusAgent());
   accumulator = 0;
   eventSignature = "";
   observerSignature = "";
@@ -210,10 +233,10 @@ function drawBackground() {
   context.restore();
 }
 
-function drawMemoryOverlay(rabbit) {
+function drawMemoryOverlay(agent) {
   const mode = elements.overlay.value;
-  if (mode === "actual" || !rabbit) return;
-  const memory = rabbit.memory;
+  if (mode === "actual" || !agent) return;
+  const memory = agent.memory;
   const cellWidth = WORLD_WIDTH / memory.columns;
   const cellHeight = WORLD_HEIGHT / memory.rows;
 
@@ -235,6 +258,11 @@ function drawMemoryOverlay(rabbit) {
           context.fillStyle = `rgba(76, 179, 222, ${water * 0.32})`;
           context.fillRect(x + 1, y + 1, cellWidth - 2, cellHeight - 2);
         }
+      } else if (mode === "prey") {
+        const prey = memory.prey[index];
+        if (prey < 0.015) continue;
+        context.fillStyle = `rgba(242, 101, 88, ${prey * 0.34})`;
+        context.fillRect(x + 1, y + 1, cellWidth - 2, cellHeight - 2);
       } else {
         const value = mode === "danger"
           ? memory.danger[index]
@@ -407,39 +435,41 @@ function drawResources() {
   }
 }
 
-function drawFocusRelations(rabbit) {
-  if (!rabbit?.alive) return;
+function drawFocusRelations(agent) {
+  if (!agent?.alive) return;
   context.save();
   context.setLineDash([5, 7]);
   context.lineWidth = 1;
   context.strokeStyle = "rgba(209, 225, 209, 0.13)";
   context.beginPath();
-  context.arc(rabbit.x, rabbit.y, CONFIG.visionRange, 0, Math.PI * 2);
+  context.arc(agent.x, agent.y, agent.profile.visionRange, 0, Math.PI * 2);
   context.stroke();
 
-  if (rabbit.decision) {
+  if (agent.decision) {
     context.setLineDash([8, 6]);
-    context.strokeStyle = rabbit.decision.label === "escape"
+    context.strokeStyle = agent.decision.label === "escape"
       ? "rgba(237, 113, 106, 0.72)"
-      : "rgba(225, 236, 205, 0.58)";
+      : agent.profile.kind === "predator"
+        ? "rgba(242, 132, 94, 0.65)"
+        : "rgba(225, 236, 205, 0.58)";
     context.beginPath();
-    context.moveTo(rabbit.x, rabbit.y);
+    context.moveTo(agent.x, agent.y);
     context.lineTo(
-      clamp(rabbit.decision.target.x, 0, WORLD_WIDTH),
-      clamp(rabbit.decision.target.y, 0, WORLD_HEIGHT),
+      clamp(agent.decision.target.x, 0, WORLD_WIDTH),
+      clamp(agent.decision.target.y, 0, WORLD_HEIGHT),
     );
     context.stroke();
   }
 
-  const perception = rabbit.lastPerception;
+  const perception = agent.lastPerception;
   if (perception?.heardThreat && !perception.visibleThreat) {
     context.setLineDash([2, 7]);
     context.strokeStyle = "rgba(237, 113, 106, 0.5)";
     context.beginPath();
-    context.moveTo(rabbit.x, rabbit.y);
+    context.moveTo(agent.x, agent.y);
     context.lineTo(
-      rabbit.x + perception.heardThreat.x * 94,
-      rabbit.y + perception.heardThreat.y * 94,
+      agent.x + perception.heardThreat.x * 94,
+      agent.y + perception.heardThreat.y * 94,
     );
     context.stroke();
   }
@@ -450,21 +480,28 @@ function drawFocusRelations(rabbit) {
       ? "rgba(132, 205, 118, 0.18)"
       : "rgba(104, 199, 221, 0.2)";
     context.beginPath();
-    context.moveTo(rabbit.x, rabbit.y);
+    context.moveTo(agent.x, agent.y);
     context.lineTo(resource.x, resource.y);
     context.stroke();
   }
   for (const obstacle of perception?.visibleObstacles ?? []) {
     context.strokeStyle = "rgba(177, 187, 181, 0.17)";
     context.beginPath();
-    context.moveTo(rabbit.x, rabbit.y);
+    context.moveTo(agent.x, agent.y);
     context.lineTo(obstacle.x, obstacle.y);
+    context.stroke();
+  }
+  for (const rabbit of perception?.visiblePrey ?? []) {
+    context.strokeStyle = "rgba(242, 113, 98, 0.26)";
+    context.beginPath();
+    context.moveTo(agent.x, agent.y);
+    context.lineTo(rabbit.x, rabbit.y);
     context.stroke();
   }
   context.restore();
 }
 
-function drawThreat() {
+function drawThreat(focused = false) {
   const threat = simulation.threat;
   const color = threat.state === "attack"
     ? "#ffb15d"
@@ -482,6 +519,22 @@ function drawThreat() {
   context.beginPath();
   context.arc(threat.x, threat.y, 30 + Math.sin(simulation.tick * 0.08) * 3, 0, Math.PI * 2);
   context.stroke();
+
+  if (focused) {
+    context.strokeStyle = "rgba(232, 183, 104, 0.9)";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.arc(threat.x, threat.y, 18, 0, Math.PI * 2);
+    context.stroke();
+  }
+  if (threat.leapPulse > 0) {
+    const progress = 1 - threat.leapPulse / 34;
+    context.strokeStyle = `rgba(186, 155, 231, ${1 - progress})`;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.arc(threat.x, threat.y, 20 + progress * 28, 0, Math.PI * 2);
+    context.stroke();
+  }
 
   context.translate(threat.x, threat.y);
   context.rotate(Math.atan2(threat.vy, threat.vx));
@@ -579,13 +632,13 @@ function drawScene() {
   context.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
   context.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   drawBackground();
-  const focused = focusRabbit();
+  const focused = focusAgent();
   drawMemoryOverlay(focused);
   drawObstacles();
   drawResources();
   drawFocusRelations(focused);
-  drawThreat();
-  for (const rabbit of simulation.rabbits) drawRabbit(rabbit, rabbit.id === focusedRabbitId);
+  drawThreat(focused === simulation.threat);
+  for (const rabbit of simulation.rabbits) drawRabbit(rabbit, rabbit.focusKey === focusedAgentKey);
   drawBoundary();
 
   context.save();
@@ -595,13 +648,13 @@ function drawScene() {
   context.restore();
 }
 
-function renderEventLog(rabbit) {
-  const signature = `${rabbit.id}:${rabbit.events.map((event) => `${event.tick}-${event.type}`).join("|")}`;
+function renderEventLog(agent) {
+  const signature = `${agent.focusKey}:${agent.events.map((event) => `${event.tick}-${event.type}`).join("|")}`;
   if (signature === eventSignature) return;
   eventSignature = signature;
   elements.eventLog.replaceChildren();
 
-  if (rabbit.events.length === 0) {
+  if (agent.events.length === 0) {
     const empty = document.createElement("li");
     empty.className = "empty-event";
     empty.textContent = "最初の意思決定を待っています。";
@@ -609,7 +662,7 @@ function renderEventLog(rabbit) {
     return;
   }
 
-  for (const event of rabbit.events.slice(0, 8)) {
+  for (const event of agent.events.slice(0, 8)) {
     const item = document.createElement("li");
     item.className = event.type;
     const meta = document.createElement("div");
@@ -631,57 +684,75 @@ function renderEventLog(rabbit) {
 }
 
 function updateFocusOptionLabels() {
+  const agents = simulation.relationalAgents();
   for (const option of elements.focus.options) {
-    const rabbit = simulation.rabbits.find((candidate) => candidate.id === Number(option.value));
-    option.textContent = rabbit?.alive
-      ? `Rabbit ${rabbit.id + 1}`
-      : `Rabbit ${rabbit?.id + 1} · stopped`;
+    const agent = agents.find((candidate) => candidate.focusKey === option.value);
+    if (!agent) continue;
+    option.textContent = agent.profile.kind === "rabbit"
+      ? `Rabbit ${agent.id + 1}${agent.alive ? "" : " · stopped"}`
+      : `Predator 1 · ${agent.state}`;
   }
 }
 
 function updateInterface(force = false) {
   if (!force && simulation.tick === lastUiTick) return;
   lastUiTick = simulation.tick;
-  const rabbit = focusRabbit();
+  const agent = focusAgent();
   const metrics = simulation.metrics();
 
-  elements.focusId.textContent = String(rabbit.id + 1);
-  elements.focusStatus.textContent = rabbit.alive ? "alive" : "stopped";
-  elements.focusStatus.classList.toggle("dead", !rabbit.alive);
-  elements.fieldMode.textContent = overlayLabels[elements.overlay.value];
+  elements.focusKind.textContent = agent.profile.name;
+  elements.focusId.textContent = agent.profile.kind === "rabbit" ? String(agent.id + 1) : "1";
+  elements.focusStatus.textContent = agent.profile.status(agent);
+  elements.focusStatus.classList.toggle("dead", !agent.alive);
+  const overlay = agent.profile.overlays.find((candidate) => candidate.value === elements.overlay.value);
+  elements.fieldMode.textContent = overlay?.label ?? "観測: 物理環境";
   updateFocusOptionLabels();
 
-  for (const [name, meter] of Object.entries(needMeters)) setMeter(meter, rabbit[name]);
-
-  const hMaximum = Math.max(1.05, rabbit.thetaEffective * 1.25);
-  for (const [name, meter] of Object.entries(hMeters)) setMeter(meter, rabbit.H[name], hMaximum);
-  elements.thetaValue.textContent = rabbit.thetaEffective.toFixed(2);
-  elements.xiValue.textContent = rabbit.xi.toFixed(2);
-  elements.reliabilityValues.textContent = [
-    `資源 ${rabbit.reliability.resource.toFixed(2)}`,
-    `危険 ${rabbit.reliability.danger.toFixed(2)}`,
-    `移動 ${rabbit.reliability.motion.toFixed(2)}`,
-  ].join(" · ");
-  elements.leapCount.textContent = String(rabbit.leapCount);
-
-  if (rabbit.alive && rabbit.decision) {
-    elements.decisionLabel.textContent = decisionLabels[rabbit.decision.label] ?? rabbit.decision.label;
-    elements.decisionHeading.textContent = rabbit.decision.title;
-    elements.decisionReason.textContent = rabbit.decision.reason;
-    const predicted = rabbit.decision.prediction;
-    elements.predictionValues.textContent = [
-      `資源 ${predicted.resource.toFixed(2)}`,
-      `危険 ${predicted.danger.toFixed(2)}`,
-      `移動 ${predicted.motion.toFixed(2)}`,
-    ].join(" / ");
-  } else if (!rabbit.alive) {
-    elements.decisionLabel.textContent = "stopped";
-    elements.decisionHeading.textContent = "行動停止";
-    elements.decisionReason.textContent = rabbit.causeOfDeath ?? "この個体は更新対象から外れました。";
-    elements.predictionValues.textContent = "予測更新なし";
+  elements.needsHeading.textContent = agent.profile.needHeading;
+  const needs = agent.profile.needIndicators(agent);
+  for (let index = 0; index < needMeters.length; index += 1) {
+    needMeters[index].label.textContent = needs[index]?.label ?? "—";
+    setMeter(needMeters[index], needs[index]?.value ?? 0);
   }
 
-  renderEventLog(rabbit);
+  const hMaximum = Math.max(1.05, agent.thetaEffective * 1.25);
+  for (let index = 0; index < hMeters.length; index += 1) {
+    const dimension = agent.profile.errorDimensions[index];
+    hMeters[index].label.textContent = dimension;
+    setMeter(hMeters[index], agent.H[dimension], hMaximum);
+  }
+  elements.thetaValue.textContent = agent.thetaEffective.toFixed(2);
+  elements.xiValue.textContent = agent.xi.toFixed(2);
+  elements.reliabilityValues.textContent = agent.profile.errorDimensions
+    .map((dimension) => (
+      `${agent.profile.dimensionLabels[dimension]} ${agent.reliability[dimension].toFixed(2)}`
+    ))
+    .join(" · ");
+  elements.leapCount.textContent = String(agent.leapCount);
+
+  if (agent.alive && agent.decision) {
+    elements.decisionLabel.textContent = decisionLabels[agent.decision.label] ?? agent.decision.label;
+    elements.decisionHeading.textContent = agent.decision.title;
+    elements.decisionReason.textContent = agent.decision.reason;
+    const predicted = agent.decision.prediction;
+    elements.predictionValues.textContent = agent.profile.errorDimensions
+      .map((dimension) => (
+        `${agent.profile.dimensionLabels[dimension]} ${predicted[dimension].toFixed(2)}`
+      ))
+      .join(" / ");
+  } else if (!agent.alive) {
+    elements.decisionLabel.textContent = "stopped";
+    elements.decisionHeading.textContent = "行動停止";
+    elements.decisionReason.textContent = agent.causeOfDeath ?? "この個体は更新対象から外れました。";
+    elements.predictionValues.textContent = "予測更新なし";
+  } else {
+    elements.decisionLabel.textContent = "perceive";
+    elements.decisionHeading.textContent = "初期知覚を構成中";
+    elements.decisionReason.textContent = "最初の fixed tick で行動候補を比較します。";
+    elements.predictionValues.textContent = "予測構成中";
+  }
+
+  renderEventLog(agent);
   elements.metricTick.textContent = metrics.tick.toLocaleString("ja-JP");
   elements.metricEpisode.textContent = String(metrics.episode);
   elements.metricLiving.textContent = `${metrics.living} / ${CONFIG.rabbitCount}`;
@@ -709,9 +780,11 @@ elements.reset.addEventListener("click", rebuildSimulation);
 elements.seed.addEventListener("keydown", (event) => {
   if (event.key === "Enter") rebuildSimulation();
 });
-elements.focus.addEventListener("change", () => setFocusedRabbit(elements.focus.value));
+elements.focus.addEventListener("change", () => setFocusedAgent(elements.focus.value));
 elements.overlay.addEventListener("change", () => {
-  elements.fieldMode.textContent = overlayLabels[elements.overlay.value];
+  const agent = focusAgent();
+  const overlay = agent.profile.overlays.find((candidate) => candidate.value === elements.overlay.value);
+  elements.fieldMode.textContent = overlay?.label ?? "観測: 物理環境";
   drawScene();
 });
 
@@ -721,14 +794,14 @@ canvas.addEventListener("pointerdown", (event) => {
   const y = ((event.clientY - bounds.top) / bounds.height) * WORLD_HEIGHT;
   let nearest = null;
   let nearestDistance = Infinity;
-  for (const rabbit of simulation.rabbits) {
-    const currentDistance = Math.hypot(x - rabbit.x, y - rabbit.y);
+  for (const agent of simulation.relationalAgents()) {
+    const currentDistance = Math.hypot(x - agent.x, y - agent.y);
     if (currentDistance < nearestDistance) {
-      nearest = rabbit;
+      nearest = agent;
       nearestDistance = currentDistance;
     }
   }
-  if (nearest && nearestDistance <= 42) setFocusedRabbit(nearest.id);
+  if (nearest && nearestDistance <= 42) setFocusedAgent(nearest.focusKey);
 });
 
 window.addEventListener("keydown", (event) => {
@@ -773,6 +846,7 @@ function animationFrame(now) {
 
 configureCanvas();
 buildFocusOptions();
+rebuildOverlayOptions(focusAgent());
 updateInterface(true);
 drawScene();
 requestAnimationFrame(animationFrame);
