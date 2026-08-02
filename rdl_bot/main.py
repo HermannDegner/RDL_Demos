@@ -60,6 +60,41 @@ LLM_TRUST_CONFIG_PATH = "data/llm_trust_config.json"
 DYNAMICS_CONFIG_PATH = "data/dynamics_config.json"
 DOMAIN_TAGS = ["人", "概念", "物語", "制度", "身体"]
 
+# 「入力を捉えられたか」の実測値。E_match = |observed − predicted| の observed 側。
+MATCH_OBSERVATION = {"exact": 1.0, "partial": 0.6, "miss": 0.0}
+
+
+def _observed_acceptance() -> dict:
+    cfg = dynamics.CONFIG
+    return {
+        "y": cfg.observed_agree,
+        "?": cfg.observed_rephrase,
+        "n": cfg.observed_deny,
+        "": cfg.observed_silence,
+    }
+
+
+def _predicted_acceptance(graph: NodeGraph, node_id: str) -> float:
+    """
+    「この応答は受け入れられる」という M_B 自身の予測。
+
+    応答を担ったノードの confidence が、そのままその方向の慣性の強さ
+    （＝どれだけ自信を持って出したか）なので予測値に使う。
+    ノードが無い応答（グラフ内合成・LLM生応答・危機モード）は
+    内部に根拠が無いので設定値の低い予測を使う。
+    """
+    node = graph.get_by_id(node_id)
+    if node is None:
+        return dynamics.CONFIG.fallback_predicted_acceptance
+    return node.confidence
+
+
+def _error_note(error: Optional[float], fallback: float) -> str:
+    """フィードバック表示用。E駆動なら実際の増分を、そうでなければ従来値を示す。"""
+    if error is None:
+        return f"H_post +{fallback:.1f}"
+    return f"E={error:.2f} → H_post +{dynamics.CONFIG.e_gain_acceptance * error:.2f}"
+
 
 def load_llm_trust_config(path: str) -> LLMTrustConfig:
     """
@@ -88,34 +123,41 @@ def apply_feedback(fb: str, last_node_id: str, last_input: str, graph: NodeGraph
     fb = fb.strip().lower()
     node = graph.get_by_id(last_node_id)
 
+    # 実測（Δの終点）: 応答時に書き留めた受容予測と突き合わせて E を出す。
+    observed = _observed_acceptance().get(fb)
+    error = h.close_decision(observed) if observed is not None else None
+
     if fb == "n":
-        h.on_deny(last_node_id)
+        h.on_deny(last_node_id, error)
         if node:
             node.confidence = max(0.05, node.confidence * 0.85)
             node.record_counterexample(last_input, "deny")
             graph.save()
-        print("  → 否定を記録しました (H_post +1.0, confidence減衰)")
+        print(f"  → 否定を記録しました ({_error_note(error, 1.0)}, confidence減衰)")
     elif fb == "?":
-        h.on_rephrase(last_node_id)
+        h.on_rephrase(last_node_id, error)
         if node:
             node.confidence = max(0.05, node.confidence * 0.95)
             node.record_counterexample(last_input, "rephrase")
             graph.save()
-        print("  → 言い換えを記録しました (H_post +0.3, confidence減衰)")
+        print(f"  → 言い換えを記録しました ({_error_note(error, 0.3)}, confidence減衰)")
     elif fb == "y":
-        h.on_agree(last_node_id)
+        h.on_agree(last_node_id, error)
         if node:
             node.confidence = min(1.0, node.confidence * 1.05)
             node.approval_count += 1
             node.touch()
             graph.save()
-        print("  → 同意を記録しました (H_post x0.7, confidence微増, approval_count+1)")
+        print(f"  → 同意を記録しました (H_post x0.7, {_error_note(error, 0.0)}, "
+              f"confidence微増, approval_count+1)")
     # 空Enterは H を上げない
 
 
 def feedback_prompt(last_node_id: str, last_input: str, graph: NodeGraph, h: HState) -> None:
     """応答後のフィードバックを求める。"""
     fb = input("  [fb] > ")
+    if fb.strip() == "":
+        fb = ""  # 空Enterは沈黙として観測する
     apply_feedback(fb, last_node_id, last_input, graph, h)
 
 
@@ -549,18 +591,24 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
     確率的にLLMへ相談する（下のllm_trustブロック）。経験が育った
     ドメインでは信用度が下がり、この早期相談は自然に起きなくなる。
     """
+    # 検索する前に「この入力を捉えられる」という予測を確定させておく（Δの始点）。
+    # 予測を先に固定しないと E = |observed − predicted| が計算できない。
+    h.predict_match()
     node, match_type, nearest = graph.search(user_input)
 
     # ξ圧は跳躍境界を揺らし(θ_eff)、整合側の更新量にも効く。1ターン1回だけ評価する。
     pressure = xi_pressure(xi_pool)
 
+    # 実測（Δの終点）: 捉えられたか。E_match が H_pre の増分になる。
+    e_match = h.observe_match(MATCH_OBSERVATION[match_type])
+
     if match_type == "exact":
-        h.on_exact(node.id)
+        h.on_exact(node.id, e_match)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
         _reinforce_along_v_b(node, h, pressure, dynamics.CONFIG.align_rate_exact)
     elif match_type == "partial":
-        h.on_partial(node.id)
+        h.on_partial(node.id, e_match)
         node.touch()
         node.increment_usage() # M_lat -> M_act 昇格判定
         _reinforce_along_v_b(node, h, pressure, dynamics.CONFIG.align_rate_partial)
@@ -586,7 +634,7 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
         # ミス：十分に似たノードが無ければ PENDING_MISS_ID 側へ積む。
         # 無関係なノードに積むと、そのノードが後で誤って修正・隔離される。
         context_nid = nearest.id if nearest else None
-        h.on_miss(context_nid)
+        h.on_miss(context_nid, e_match)
 
     # --- 構造の再編成(leap)は、今回の応答生成とは独立に処理する ---
     # Hが溜まっている場所（target）と、今回の入力（trigger）は別物なので、
@@ -827,6 +875,9 @@ def main():
             print(f"  [ERROR] 応答生成に失敗しました: {e}")
             graph.save()
             continue
+        # 応答した時点で「これは受け入れられる」という予測を書き留める（Δの始点）。
+        # ユーザー反応が返った時に突き合わせて E_acceptance を出す。
+        h.open_decision(last_node_id, _predicted_acceptance(graph, last_node_id))
         last_input = user_input
         print(f"Bot  > {response}")
 

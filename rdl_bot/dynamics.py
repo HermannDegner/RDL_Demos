@@ -46,6 +46,27 @@ class DynamicsConfig:
     dissipation_gamma: float = 0.01     # 慣性あたりの散逸速度
     dissipation_cap: float = 0.15       # 1ターンで冷める割合の上限
 
+    # --- E = F(t+Δ) − M_B·F(t)（Core §2.3）---
+    # H への注入利得 gain_i。H_i = decay_i·H_i + gain_i·E_i の gain 側。
+    # decay 側は散逸行列 A（上）が担うので、ここには置かない。
+    e_gain_match: float = 0.8           # 「入力を捉えられる」予測が外れた分
+    e_gain_acceptance: float = 1.4      # 「応答が受け入れられる」予測が外れた分
+
+    # 次に来る入力を捉えられるかの予測（EMA）の追従速度
+    match_prediction_smoothing: float = 0.12
+    # 次元ごとの予測信頼度の追従速度（Living Field と同じ 0.035）
+    reliability_smoothing: float = 0.035
+
+    # 応答を担うノードが無い場合（グラフ内合成・LLM生応答・危機モード）の
+    # 受容予測。内部に根拠が無いので低めに置く。
+    fallback_predicted_acceptance: float = 0.3
+
+    # ユーザー反応の観測値。E = |observed − predicted| の observed 側。
+    observed_agree: float = 1.0
+    observed_rephrase: float = 0.5
+    observed_deny: float = 0.0
+    observed_silence: float = 0.25      # 弱い否定シグナル
+
     def to_dict(self) -> dict:
         return asdict(self)
 

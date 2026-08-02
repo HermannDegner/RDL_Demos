@@ -50,35 +50,127 @@ class HState:
         # θ_eff の揺動用。テストから差し替えられるよう外部注入可能にする。
         self._rng = rng or random.Random()
 
+        # --- E = F(t+Δ) − M_B·F(t) 用（Core §2.3）---
+        # 「次に来る入力を捉えられる」という M_B 自身の予測。実測との差が E_match。
+        # 起動直後は根拠が無いので中立値から始める。
+        self.predicted_match = 0.5
+        # 直近の予測誤差。制御には使わず、観測窓としてだけ持つ。
+        self.last_error: Dict[str, float] = {"match": 0.0, "acceptance": 0.0}
+        # 次元ごとの予測信頼度。予測が当たり続けるほど 1 に近づく。
+        self.reliability: Dict[str, float] = {"match": 0.5, "acceptance": 0.5}
+        # 応答してからユーザー反応が返るまで開いている決定。
+        # Living Field の Rabbit が持つ this.decision と同じ役割で、
+        # 「予測を書き込んでおき、あとで実測と突き合わせる」ための器。
+        self.decision: Optional[Dict[str, object]] = None
+
+    # --- E = F(t+Δ) − M_B·F(t)（Core §2.3）---
+
+    def _absorb(self, dimension: str, error: float) -> float:
+        """
+        観測した予測誤差を記録し、信頼度を更新して E を返す。
+        Living Field の evaluateDecision() と同じ形。
+        """
+        error = max(0.0, min(1.0, error))
+        self.last_error[dimension] = error
+        alpha = dynamics.CONFIG.reliability_smoothing
+        current = self.reliability.get(dimension, 0.5)
+        self.reliability[dimension] = max(0.18, min(0.98,
+            current + alpha * ((1.0 - error) - current)))
+        return error
+
+    def predict_match(self) -> float:
+        """
+        「次に来る入力を捉えられる」という M_B 自身の予測。
+        search する前に確定している必要があるため、直近の実測のEMAを使う。
+        """
+        return self.predicted_match
+
+    def observe_match(self, observed: float) -> float:
+        """
+        入力を実際に捉えられたかを観測し、E_match を返して予測を更新する。
+
+        これにより、同じ miss でも意味が変わる。捉えられていたはずの領域で
+        外したときは E が大きく、ずっと外し続けている領域での miss は
+        E が小さい（＝驚きではない）。
+        """
+        observed = max(0.0, min(1.0, observed))
+        error = self._absorb("match", abs(observed - self.predicted_match))
+        alpha = dynamics.CONFIG.match_prediction_smoothing
+        self.predicted_match += alpha * (observed - self.predicted_match)
+        return error
+
+    def open_decision(self, node_id: str, predicted_acceptance: float) -> None:
+        """
+        応答した時点で「この応答は受け入れられる」という予測を書き留める。
+        ユーザー反応が返るまで開いたままにする（Δ の始点）。
+        """
+        self.decision = {
+            "node_id": node_id,
+            "predicted_acceptance": max(0.0, min(1.0, predicted_acceptance)),
+        }
+
+    def close_decision(self, observed_acceptance: float) -> Optional[float]:
+        """
+        ユーザー反応（Δ の終点）で予測と実測を突き合わせ、E_acceptance を返す。
+        開いている決定が無ければ None（この場合は従来の定数増分にフォールバック）。
+        """
+        if self.decision is None:
+            return None
+        predicted = float(self.decision["predicted_acceptance"])
+        self.decision = None
+        return self._absorb("acceptance", abs(observed_acceptance - predicted))
+
     # --- H_pre 更新 ---
 
-    def on_miss(self, context_node_id: Optional[str] = None):
+    def on_miss(self, context_node_id: Optional[str] = None,
+                error: Optional[float] = None):
         """
         未知入力のHを積む。context_node_id が None（＝十分に似た既存ノードが
         無い）なら PENDING_MISS_ID に積む。無関係なノードへ積むと、
         そのノードが後で誤って修正・隔離の対象に選ばれてしまう。
         """
-        self._add_pre(context_node_id or self.PENDING_MISS_ID, 0.5, "miss")
+        self._add_pre(context_node_id or self.PENDING_MISS_ID,
+                      self._match_delta(0.5, error), "miss")
 
-    def on_partial(self, node_id: str):
-        self._add_pre(node_id, 0.2, "partial")
+    def on_partial(self, node_id: str, error: Optional[float] = None):
+        self._add_pre(node_id, self._match_delta(0.2, error), "partial")
 
-    def on_exact(self, node_id: str):
+    def on_exact(self, node_id: str, error: Optional[float] = None):
+        # 完全一致は「捉えられた」ので既存のHを冷ます。ただし予測が外れて
+        # いた場合（当たらないと思っていたのに当たった）はその驚きを積む。
         self._mul_pre(node_id, 0.8, "exact")
+        if error is not None:
+            self._add_pre(node_id, self._match_delta(0.0, error), "exact_error")
+
+    def _match_delta(self, fallback: float, error: Optional[float]) -> float:
+        """E が渡されていれば gain×E、無ければ従来の定数（設計書 §3.2）。"""
+        if error is None:
+            return fallback
+        return dynamics.CONFIG.e_gain_match * error
+
+    def _acceptance_delta(self, fallback: float, error: Optional[float]) -> float:
+        if error is None:
+            return fallback
+        return dynamics.CONFIG.e_gain_acceptance * error
 
     # --- H_post 更新（ユーザー反応） ---
 
-    def on_deny(self, node_id: str):
-        self._add_post(node_id, 1.0, "deny")
+    def on_deny(self, node_id: str, error: Optional[float] = None):
+        self._add_post(node_id, self._acceptance_delta(1.0, error), "deny")
 
-    def on_rephrase(self, node_id: str):
-        self._add_post(node_id, 0.3, "rephrase")
+    def on_rephrase(self, node_id: str, error: Optional[float] = None):
+        self._add_post(node_id, self._acceptance_delta(0.3, error), "rephrase")
 
-    def on_agree(self, node_id: str):
+    def on_agree(self, node_id: str, error: Optional[float] = None):
+        # 同意は既存のHを冷ます（設計書 §3.2）。ただし「通らないと思って
+        # いた応答が通った」場合はM_Bが過小評価しているという情報なので、
+        # その驚きは積む。否定だけが学習を駆動する非対称を解消する。
         self._mul_post(node_id, 0.7, "agree")
+        if error is not None:
+            self._add_post(node_id, self._acceptance_delta(0.0, error), "agree_error")
 
-    def on_silence(self, node_id: str):
-        self._add_post(node_id, 0.5, "silence") # 設計書 v0.3 §3.2 に合わせて 0.5 に変更
+    def on_silence(self, node_id: str, error: Optional[float] = None):
+        self._add_post(node_id, self._acceptance_delta(0.5, error), "silence")
 
     # --- leap 判定 ---
 
@@ -238,7 +330,12 @@ class HState:
         max_pre = max(self.H_pre.values(), default=0.0)
         max_post = max(self.H_post.values(), default=0.0)
         return (f"H_pre_max={max_pre:.2f}  H_post_max={max_post:.2f}  "
-                f"θ={self.theta:.2f}  ξ圧={pressure:.2f}  θ_eff≈{self.theta_eff(pressure):.2f}")
+                f"θ={self.theta:.2f}  ξ圧={pressure:.2f}  θ_eff≈{self.theta_eff(pressure):.2f}\n"
+                f"  E: match={self.last_error['match']:.2f} "
+                f"acceptance={self.last_error['acceptance']:.2f}"
+                f"   予測信頼度: match={self.reliability['match']:.2f} "
+                f"acceptance={self.reliability['acceptance']:.2f}"
+                f"   次の一致予測={self.predicted_match:.2f}")
 
     def hot_nodes(self, top: int = 3) -> list[tuple[str, float]]:
         merged = {}
