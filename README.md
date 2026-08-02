@@ -81,6 +81,7 @@ RDL（関係力学言語 / Relational Dynamics Language）をベースにした�
 ~~~text
 RDL_Demos/
 ├── index.html
+├── rdl_core/               RDL中核概念の汎用参照実装
 ├── demos/
 │   ├── ecology-gradient-world/
 │   ├── ecology-limited-senses/
@@ -93,6 +94,20 @@ RDL_Demos/
 ├── demo0/ ... demo6/       旧URLからの転送
 └── rdl_bot/                CLIチャットボット
 ~~~
+
+## rdl_core（参照実装）
+
+`rdl_core/` は、RDL文書側の中核概念を特定デモに依存しない形で読むための
+最小参照コードである。
+
+- `Boundary`：境界 `B`
+- `MBNode`：整合慣性 `M_B`
+- `HVector`：予測誤差の蓄積 `H_vec`
+- `LeapEngine`：`M_Δ -> M_B'` の再編
+- `MBGraph`：`W_ij` / 入れ子状 `M_B` ネットワーク
+
+現時点では既存デモから独立した土台として置き、安定した部分から徐々に
+`RDL Living Field` などへ接続する。
 
 ---
 
