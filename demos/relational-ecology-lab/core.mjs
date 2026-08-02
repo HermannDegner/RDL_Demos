@@ -11,6 +11,13 @@ export const CONFIG = Object.freeze({
   soundRange: 285,
   threatVisionRange: 225,
   threatCaptureRange: 10,
+  threatAttackRange: 34,
+  threatAttackSpeed: 3.75,
+  threatAttackTicks: 12,
+  threatRecoverySpeed: 0.62,
+  threatRecoveryTicks: 54,
+  threatCaptureChanceUnaware: 0.78,
+  threatCaptureChanceEscape: 0.28,
   resourceDormancyThreshold: 0.08,
   planInterval: 15,
   worldMargin: 18,
@@ -908,6 +915,25 @@ export class Rabbit {
     }
   }
 
+  surviveAttack(tick, threat) {
+    const away = normalized(this.x - threat.x, this.y - threat.y);
+    const currentSpeed = vectorLength(this.vx, this.vy);
+    const escapeSpeed = clamp(currentSpeed + 0.72, 1.8, 3.05);
+    this.vx = away.x * escapeSpeed;
+    this.vy = away.y * escapeSpeed;
+    this.fear = Math.max(this.fear, 0.86);
+    this.memory.stamp(this.memory.danger, threat.x, threat.y, 1, 2);
+    if (this.decision) this.decision.actual.danger = 1;
+    else this.H.danger = Math.max(this.H.danger, this.thetaEffective);
+    this.planTimer = 0;
+    this.log(
+      tick,
+      "attack-survived",
+      "捕食から離脱",
+      "接触を生き延び、危険地点を記憶して退避行動を更新",
+    );
+  }
+
   die(tick, cause) {
     if (!this.alive) return;
     this.alive = false;
@@ -930,7 +956,98 @@ export class Threat {
     this.lastSeen = null;
     this.memoryTicks = 0;
     this.restTicks = 0;
+    this.attackTicks = 0;
+    this.attackDirection = null;
+    this.recoveryTicks = 0;
     this.config = config;
+  }
+
+  beginAttack(target) {
+    const leadTicks = 3;
+    this.attackDirection = normalized(
+      target.x + target.vx * leadTicks - this.x,
+      target.y + target.vy * leadTicks - this.y,
+    );
+    this.state = "attack";
+    this.targetId = target.id;
+    this.attackTicks = this.config.threatAttackTicks;
+    this.memoryTicks = 0;
+    this.lastSeen = { x: target.x, y: target.y };
+
+    const launchSpeed = Math.min(
+      this.config.threatAttackSpeed,
+      Math.max(2.55, vectorLength(this.vx, this.vy)),
+    );
+    this.vx = this.attackDirection.x * launchSpeed;
+    this.vy = this.attackDirection.y * launchSpeed;
+    return {
+      type: "attack",
+      targetId: target.id,
+      title: `Rabbit ${target.id + 1} へ捕食行動`,
+      detail: `${this.config.threatAttackTicks} tick の加速後、回復状態へ移る`,
+    };
+  }
+
+  beginRecovery(targetId = this.targetId) {
+    const slowed = capVector(this.vx, this.vy, this.config.threatRecoverySpeed);
+    this.vx = slowed.x;
+    this.vy = slowed.y;
+    this.state = "recover";
+    this.targetId = null;
+    this.attackTicks = 0;
+    this.attackDirection = null;
+    this.recoveryTicks = this.config.threatRecoveryTicks;
+    this.memoryTicks = 0;
+    this.lastSeen = null;
+    return {
+      type: "attack-miss",
+      targetId,
+      title: "捕食行動が不成立",
+      detail: `${this.config.threatRecoveryTicks} tick は速度が低下する`,
+    };
+  }
+
+  resolveAttack(rabbits, rng, tick) {
+    if (this.state !== "attack") return null;
+    const target = rabbits.find((rabbit) => rabbit.id === this.targetId && rabbit.alive);
+    if (!target || distance(this, target) > this.config.threatCaptureRange) return null;
+
+    const away = normalized(target.x - this.x, target.y - this.y);
+    const awaySpeed = target.vx * away.x + target.vy * away.y;
+    const escaping = target.decision?.label === "escape" && awaySpeed >= 0.8;
+    const captureChance = escaping
+      ? this.config.threatCaptureChanceEscape
+      : this.config.threatCaptureChanceUnaware;
+
+    if (rng.next() < captureChance) {
+      target.die(tick, "捕食行動を受け、離脱できなかった");
+      const targetId = target.id;
+      this.state = "rest";
+      this.targetId = null;
+      this.attackTicks = 0;
+      this.attackDirection = null;
+      this.recoveryTicks = 0;
+      this.memoryTicks = 0;
+      this.lastSeen = null;
+      this.restTicks = 150;
+      this.vx *= 0.24;
+      this.vy *= 0.24;
+      return {
+        type: "capture",
+        targetId,
+        title: `Rabbit ${targetId + 1} を捕食`,
+        detail: `${escaping ? "逃走成立" : "逃走未成立"}の接触 / 成功率 ${(captureChance * 100).toFixed(0)}%`,
+      };
+    }
+
+    target.surviveAttack(tick, this);
+    const event = this.beginRecovery(target.id);
+    return {
+      ...event,
+      type: "attack-escaped",
+      title: `Rabbit ${target.id + 1} が離脱`,
+      detail: `${escaping ? "逃走成立" : "逃走未成立"}の接触を生還 / 捕食者は速度低下`,
+    };
   }
 
   update(world, rabbits, rng) {
@@ -946,6 +1063,38 @@ export class Threat {
       this.y += this.vy;
       world.constrainEntity(this, 10);
       return;
+    }
+
+    if (this.recoveryTicks > 0) {
+      this.recoveryTicks -= 1;
+      this.state = "recover";
+      this.targetId = null;
+      this.vx *= 0.965;
+      this.vy *= 0.965;
+      const slowed = capVector(this.vx, this.vy, this.config.threatRecoverySpeed);
+      this.vx = slowed.x;
+      this.vy = slowed.y;
+      this.x += this.vx;
+      this.y += this.vy;
+      world.constrainEntity(this, 10);
+      return null;
+    }
+
+    if (this.state === "attack") {
+      if (this.attackTicks <= 0) return this.beginRecovery();
+      const desired = this.attackDirection ?? normalized(this.vx, this.vy);
+      const speed = this.config.threatAttackSpeed;
+      const steering = capVector(desired.x * speed - this.vx, desired.y * speed - this.vy, 0.34);
+      this.vx += steering.x;
+      this.vy += steering.y;
+      const capped = capVector(this.vx, this.vy, speed);
+      this.vx = capped.x;
+      this.vy = capped.y;
+      this.x += this.vx;
+      this.y += this.vy;
+      this.attackTicks -= 1;
+      world.constrainEntity(this, 10);
+      return null;
     }
 
     let visibleTarget = null;
@@ -971,6 +1120,26 @@ export class Threat {
       this.state = "wander";
       this.targetId = null;
       this.lastSeen = null;
+    }
+
+    if (visibleTarget && nearest <= this.config.threatAttackRange) {
+      const event = this.beginAttack(visibleTarget);
+      const speed = this.config.threatAttackSpeed;
+      const steering = capVector(
+        this.attackDirection.x * speed - this.vx,
+        this.attackDirection.y * speed - this.vy,
+        0.34,
+      );
+      this.vx += steering.x;
+      this.vy += steering.y;
+      const capped = capVector(this.vx, this.vy, speed);
+      this.vx = capped.x;
+      this.vy = capped.y;
+      this.x += this.vx;
+      this.y += this.vy;
+      this.attackTicks -= 1;
+      world.constrainEntity(this, 10);
+      return event;
     }
 
     let desired = null;
@@ -1063,7 +1232,11 @@ export class Simulation {
     this.tick += 1;
     this.world.update(this.rng, this.tick, (event) => this.emitObserver(event));
     const alive = this.rabbits.filter((rabbit) => rabbit.alive);
-    this.threat.update(this.world, alive, this.rng);
+    const threatEvent = this.threat.update(this.world, alive, this.rng);
+    if (threatEvent) this.emitObserver({ tick: this.tick, ...threatEvent });
+
+    const attackEvent = this.threat.resolveAttack(this.rabbits, this.rng, this.tick);
+    if (attackEvent) this.emitObserver({ tick: this.tick, ...attackEvent });
 
     for (const rabbit of this.rabbits) {
       if (!rabbit.alive) continue;
@@ -1084,24 +1257,6 @@ export class Simulation {
 
       if (rabbit.thirst >= 0.999) rabbit.die(this.tick, "脱水でニーズを維持できなかった");
       else if (rabbit.hunger >= 0.999) rabbit.die(this.tick, "飢餓でニーズを維持できなかった");
-    }
-
-    for (const rabbit of this.rabbits) {
-      if (!rabbit.alive) continue;
-      if (distance(this.threat, rabbit) <= this.config.threatCaptureRange) {
-        rabbit.die(this.tick, "脅威に捕捉された");
-        this.emitObserver({
-          tick: this.tick,
-          type: "capture",
-          title: `Rabbit ${rabbit.id + 1} を捕捉`,
-          detail: "脅威と個体の物理距離が捕捉閾値を下回った",
-        });
-        this.threat.state = "wander";
-        this.threat.targetId = null;
-        this.threat.lastSeen = null;
-        this.threat.memoryTicks = 0;
-        this.threat.restTicks = 150;
-      }
     }
 
     const livingCount = this.rabbits.filter((rabbit) => rabbit.alive).length;
