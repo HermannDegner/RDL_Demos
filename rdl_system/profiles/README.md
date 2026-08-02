@@ -1,8 +1,8 @@
-# rdl_profiles
+# rdl_system/profiles
 
-`rdl_profiles/` keeps B-dependent coefficient hypotheses out of `rdl_core/`.
+`rdl_system/profiles/` keeps B-dependent coefficient hypotheses out of `rdl_system/core/`.
 
-`rdl_core/` provides the executable grammar: `Boundary`, `MBNode`, `HVector`,
+`rdl_system/core/` provides the executable grammar: `Boundary`, `MBNode`, `HVector`,
 `LeapEngine`, and `MBGraph`. Profiles provide coefficient bundles for a specific
 boundary, demo, or experiment.
 

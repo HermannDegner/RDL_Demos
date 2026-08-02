@@ -7,7 +7,7 @@ import {
   LeapEngine,
   MBGraph,
   MBNode,
-} from "../rdl_core/index.mjs";
+} from "../rdl_system/core/index.mjs";
 
 function assertClose(actual, expected, epsilon = 1e-12) {
   assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} != ${expected}`);

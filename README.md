@@ -81,9 +81,10 @@ RDL（関係力学言語 / Relational Dynamics Language）をベースにした�
 ~~~text
 RDL_Demos/
 ├── index.html
-├── rdl_core/               RDL中核概念の汎用参照実装
-├── rdl_profiles/           Bごとの仮設係数プロファイル
-├── rdl_experiment/         係数探索・耐久指標
+├── rdl_system/
+│   ├── core/               RDL中核概念の汎用参照実装
+│   ├── profiles/           Bごとの仮設係数プロファイル
+│   └── experiment/         係数探索・耐久指標
 ├── demos/
 │   ├── ecology-gradient-world/
 │   ├── ecology-limited-senses/
@@ -97,9 +98,9 @@ RDL_Demos/
 └── rdl_bot/                CLIチャットボット
 ~~~
 
-## rdl_core（参照実装）
+## rdl_system（参照実装）
 
-`rdl_core/` は、RDL文書側の中核概念を特定デモに依存しない形で読むための
+`rdl_system/core/` は、RDL文書側の中核概念を特定デモに依存しない形で読むための
 最小参照コードである。
 
 - `Boundary`：境界 `B`
@@ -111,8 +112,9 @@ RDL_Demos/
 現時点では既存デモから独立した土台として置き、安定した部分から徐々に
 `RDL Living Field` などへ接続する。
 
-係数は `rdl_core/` に閉じ込めず、Bごとの仮設として `rdl_profiles/` に置く。
-係数探索と耐久検査は `rdl_experiment/` が担当する。
+係数は `rdl_system/core/` に閉じ込めず、Bごとの仮設として
+`rdl_system/profiles/` に置く。係数探索と耐久検査は
+`rdl_system/experiment/` が担当する。
 
 ---
 

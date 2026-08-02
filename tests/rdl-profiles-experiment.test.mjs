@@ -1,20 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { Boundary, MBNode } from "../rdl_core/index.mjs";
+import { Boundary, MBNode } from "../rdl_system/core/index.mjs";
 import {
   botProfile,
   createProfiledNode,
   livingFieldProfile,
   mergeProfile,
-} from "../rdl_profiles/index.mjs";
-import { summarizeSnapshots } from "../rdl_experiment/durability_metrics.mjs";
+} from "../rdl_system/profiles/index.mjs";
+import { summarizeSnapshots } from "../rdl_system/experiment/durability_metrics.mjs";
 import {
   expandParameterGrid,
   runParameterSearch,
-} from "../rdl_experiment/parameter_search.mjs";
+} from "../rdl_system/experiment/parameter_search.mjs";
 
-test("profiles は rdl_core の外で係数を束ねる", () => {
+test("profiles は rdl_system/core の外で係数を束ねる", () => {
   const profile = mergeProfile(livingFieldProfile, {
     node: { xiDecay: 0.9 },
     leap: { cooldownTicks: 12 },

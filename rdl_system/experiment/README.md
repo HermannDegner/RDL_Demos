@@ -1,10 +1,10 @@
-# rdl_experiment
+# rdl_system/experiment
 
-`rdl_experiment/` is for coefficient search and durability checks.
+`rdl_system/experiment/` is for coefficient search and durability checks.
 
-It keeps exploratory logic out of `rdl_core/`. The core executes RDL dynamics,
-profiles provide coefficient hypotheses, and experiments test whether those
-hypotheses survive a target B.
+It keeps exploratory logic out of `rdl_system/core/`. The core executes RDL
+dynamics, profiles provide coefficient hypotheses, and experiments test whether
+those hypotheses survive a target B.
 
 ## Tools
 

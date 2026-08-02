@@ -3,7 +3,7 @@ import {
   HVector,
   LeapEngine,
   MBNode,
-} from "../rdl_core/index.mjs";
+} from "../core/index.mjs";
 
 export const referenceProfile = Object.freeze({
   id: "reference",
