@@ -97,7 +97,7 @@ export class HVector {
 }
 
 export class LeapEngine {
-  constructor({ cooldownTicks = 0, handlers = {} } = {}) {
+  constructor({ cooldownTicks = 10, handlers = {} } = {}) {
     this.cooldownTicks = cooldownTicks;
     this.handlers = { ...handlers };
   }
@@ -134,10 +134,14 @@ export class MBNode {
     id,
     boundary,
     reliability = 0.7,
+    alignRate = 0.035,
+    reliabilityMin = 0.18,
+    reliabilityMax = 0.98,
     h = null,
     xi = 0,
-    xiDecay = 0.9985,
+    xiDecay = 0.94,
     xiGain = 0.12,
+    xiMax = 1.2,
     leapEngine = new LeapEngine(),
     projection = null,
   }) {
@@ -147,10 +151,14 @@ export class MBNode {
     this.boundary = boundary;
     this.dimensions = [...boundary.dimensions];
     this.reliability = dimensionConfig(this.dimensions, reliability);
+    this.alignRate = dimensionConfig(this.dimensions, alignRate);
+    this.reliabilityMin = reliabilityMin;
+    this.reliabilityMax = reliabilityMax;
     this.h = h ?? new HVector({ dimensions: this.dimensions });
     this.xi = xi;
     this.xiDecay = xiDecay;
     this.xiGain = xiGain;
+    this.xiMax = xiMax;
     this.leapEngine = leapEngine;
     this.projection = projection;
     this.phase = "M_act";
@@ -192,6 +200,23 @@ export class MBNode {
     return error;
   }
 
+  updateReliability(error) {
+    const previous = { ...this.reliability };
+    for (const dimension of this.dimensions) {
+      const target = 1 - clamp(error[dimension] ?? 0);
+      const rate = this.alignRate[dimension];
+      this.reliability[dimension] = clamp(
+        previous[dimension] + (target - previous[dimension]) * rate,
+        this.reliabilityMin,
+        this.reliabilityMax,
+      );
+    }
+    return {
+      previous,
+      current: { ...this.reliability },
+    };
+  }
+
   update({ efp = null, actualF = null, predictedF = null, tick = 0 } = {}) {
     this.beginTick();
     const interpretedF = efp ? this.boundary.interpret(this, efp) : null;
@@ -203,9 +228,10 @@ export class MBNode {
     this.lastF = { ...nextF };
     this.lastError = error;
     this.h.record(error);
+    const dMB = this.updateReliability(error);
 
     const largestError = Math.max(...Object.values(error));
-    this.xi = clamp(this.xi + largestError * this.xiGain, 0, 2);
+    this.xi = clamp(this.xi + largestError * this.xiGain, 0, this.xiMax);
 
     const leap = this.leapEngine.maybeLeap(this, tick);
     return {
@@ -213,6 +239,7 @@ export class MBNode {
       predictedF: prediction,
       E: error,
       H: this.h.snapshot(),
+      dMB,
       xi: this.xi,
       thetaEffective: this.boundary.thetaEffective(this.xi),
       phase: this.phase,

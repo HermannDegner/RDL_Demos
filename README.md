@@ -82,6 +82,8 @@ RDL（関係力学言語 / Relational Dynamics Language）をベースにした�
 RDL_Demos/
 ├── index.html
 ├── rdl_core/               RDL中核概念の汎用参照実装
+├── rdl_profiles/           Bごとの仮設係数プロファイル
+├── rdl_experiment/         係数探索・耐久指標
 ├── demos/
 │   ├── ecology-gradient-world/
 │   ├── ecology-limited-senses/
@@ -108,6 +110,9 @@ RDL_Demos/
 
 現時点では既存デモから独立した土台として置き、安定した部分から徐々に
 `RDL Living Field` などへ接続する。
+
+係数は `rdl_core/` に閉じ込めず、Bごとの仮設として `rdl_profiles/` に置く。
+係数探索と耐久検査は `rdl_experiment/` が担当する。
 
 ---
 
