@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta
     name="description"
-    content="知覚制約、複合資源、能動的脅威、個体別記憶、H_vecとLeapを統合したRDL生態系実験。"
+    content="知覚制約、複合資源、地形、能動的脅威、個体別記憶、H_vecとLeapを統合したRDL生態系実験。"
   />
   <title>RDL Living Field — 統合生態系</title>
   <link rel="stylesheet" href="./style.css" />
@@ -27,7 +27,7 @@
         <h1>RDL Living Field</h1>
         <p class="lead">
           見える世界、個体が予測している世界、観測者だけが知る記録を分離した統合生態系。
-          資源の枯渇や曖昧な危険が予測差を生み、H<sub>vec</sub> が閾値を越えると行動仮説が組み替わります。
+          資源の枯渇、視界を切る地形、曖昧な危険が予測差を生み、H<sub>vec</sub> が閾値を越えると行動仮説が組み替わります。
         </p>
       </div>
       <dl class="hero-facts">
@@ -100,7 +100,7 @@
             id="world-canvas"
             width="960"
             height="640"
-            aria-label="ウサギ、草、水、脅威が動く生態系"
+            aria-label="ウサギ、草、水、岩、脅威が関係する生態系"
           ></canvas>
           <div class="canvas-hint">クリックで個体を選択</div>
         </div>
@@ -108,6 +108,7 @@
           <span><i class="legend-rabbit"></i>Rabbit</span>
           <span><i class="legend-grass"></i>草 + 遮蔽</span>
           <span><i class="legend-water"></i>水</span>
+          <span><i class="legend-rock"></i>岩 + 地形遮蔽</span>
           <span><i class="legend-threat"></i>能動的脅威</span>
           <span><i class="legend-dormant"></i>休眠地点（観測者表示）</span>
         </figcaption>
@@ -227,17 +228,17 @@
         <article>
           <span class="layer-index">01</span>
           <h3>物理環境</h3>
-          <p>連続位置、閉じた境界、資源量、遮蔽、脅威の身体。摂取と接触だけが状態を直接変えます。</p>
+          <p>連続位置、閉じた境界、資源量、固定地形、脅威の身体。摂取、遮蔽、衝突が関係を直接変えます。</p>
           <ul>
             <li>草 / 水 / 休眠</li>
-            <li>視線遮蔽 / 音</li>
-            <li>捕捉距離</li>
+            <li>草と岩の視線遮蔽 / 音</li>
+            <li>地形衝突 / 捕捉距離</li>
           </ul>
         </article>
         <article>
           <span class="layer-index">02</span>
           <h3>個体の予測場</h3>
-          <p>各Rabbitが別々に持つ食・水・危険・移動記憶。見えた範囲と曖昧な音だけで更新します。</p>
+          <p>各Rabbitが別々に持つ食・水・危険・移動記憶。見えた資源と地形、曖昧な音、実際の衝突だけで更新します。</p>
           <ul>
             <li>候補行動の価値</li>
             <li>E → H<sub>vec</sub> → Leap</li>

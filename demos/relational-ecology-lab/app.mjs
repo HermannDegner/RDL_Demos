@@ -255,6 +255,58 @@ function drawMemoryOverlay(rabbit) {
   context.restore();
 }
 
+function drawObstacle(obstacle) {
+  const radius = obstacle.radius;
+  const idNumber = Number.parseInt(obstacle.id.slice(1), 10) || 1;
+  context.save();
+  context.shadowColor = "rgba(0, 0, 0, 0.5)";
+  context.shadowBlur = 13;
+  context.shadowOffsetY = 7;
+  const stone = context.createRadialGradient(
+    obstacle.x - radius * 0.32,
+    obstacle.y - radius * 0.38,
+    radius * 0.08,
+    obstacle.x,
+    obstacle.y,
+    radius,
+  );
+  stone.addColorStop(0, "#78817b");
+  stone.addColorStop(0.45, "#4c5651");
+  stone.addColorStop(1, "#252d2a");
+  context.fillStyle = stone;
+  context.strokeStyle = "rgba(168, 181, 172, 0.28)";
+  context.lineWidth = 1.2;
+  context.beginPath();
+  for (let index = 0; index < 12; index += 1) {
+    const angle = (index / 12) * Math.PI * 2;
+    const variation = 0.9 + Math.sin(index * 2.7 + idNumber * 1.9) * 0.055;
+    const x = obstacle.x + Math.cos(angle) * radius * variation;
+    const y = obstacle.y + Math.sin(angle) * radius * variation;
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  }
+  context.closePath();
+  context.fill();
+  context.shadowColor = "transparent";
+  context.stroke();
+
+  context.strokeStyle = "rgba(198, 209, 201, 0.13)";
+  context.beginPath();
+  context.arc(
+    obstacle.x - radius * 0.08,
+    obstacle.y - radius * 0.06,
+    radius * 0.54,
+    Math.PI * 1.08,
+    Math.PI * 1.7,
+  );
+  context.stroke();
+  context.restore();
+}
+
+function drawObstacles() {
+  for (const obstacle of simulation.world.obstacles) drawObstacle(obstacle);
+}
+
 function drawDormantResource(resource) {
   context.save();
   context.setLineDash([4, 5]);
@@ -402,6 +454,13 @@ function drawFocusRelations(rabbit) {
     context.lineTo(resource.x, resource.y);
     context.stroke();
   }
+  for (const obstacle of perception?.visibleObstacles ?? []) {
+    context.strokeStyle = "rgba(177, 187, 181, 0.17)";
+    context.beginPath();
+    context.moveTo(rabbit.x, rabbit.y);
+    context.lineTo(obstacle.x, obstacle.y);
+    context.stroke();
+  }
   context.restore();
 }
 
@@ -522,6 +581,7 @@ function drawScene() {
   drawBackground();
   const focused = focusRabbit();
   drawMemoryOverlay(focused);
+  drawObstacles();
   drawResources();
   drawFocusRelations(focused);
   drawThreat();
