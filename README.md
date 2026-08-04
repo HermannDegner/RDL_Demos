@@ -95,7 +95,8 @@ RDL_Demos/
 │   ├── ecology-parameter-search/
 │   └── warp-navigation/
 ├── demo0/ ... demo6/       旧URLからの転送
-└── rdl_bot/                CLIチャットボット
+├── rdl_bot/                CLIチャットボット
+└── rdl_village/            簡易村シミュレーター（Python）
 ~~~
 
 ## rdl_system（参照実装）
@@ -115,6 +116,29 @@ RDL_Demos/
 係数は `rdl_system/core/` に閉じ込めず、Bごとの仮設として
 `rdl_system/profiles/` に置く。係数探索と耐久検査は
 `rdl_system/experiment/` が担当する。
+
+---
+
+## rdl_village（簡易村シミュレーター）
+
+[rdl_village/](rdl_village/) は `RDL_簡易村シミュレーター` と
+`RDL_NPC行動決定システム` に沿った Python 実装。外部依存なし。
+
+```bash
+python -m rdl_village 640 7
+python -m rdl_village.test_regression
+```
+
+物理世界と個体予測場を分離し、tick解決を五相へ分けて同時性を保つ。
+H_vec・ξ・θ・Leap に加え、自発熱（退屈）、思考的探索、熱の固着と再前景化、
+繁殖動機、備蓄を実装している。
+
+付属文書を二本持つ。
+
+- `RDL_生命らしさ評価指針` — 何を良くなったとみなすか。生存を目的関数から外し、
+  生命らしさを六軸へ分解する。測定上の落とし穴を実例つきで記録
+- `破断検査` — 実装が枠組み自身の基準に照らしてどこで崩れているかの記録。
+  成功した修正だけでなく、失敗した試行列を過程ごと残している
 
 ---
 
