@@ -109,6 +109,50 @@ class CanonicalMigrationSessionTests(unittest.TestCase):
         self.assertEqual(len(session.pending_records), 0)
         self.assertEqual(session.reviews[0].disposition, "unresolved")
 
+    def test_preview_requires_unresolved_review(self):
+        session, _ = make_pending_session()
+
+        preview = session.preview_latest_reconstruction()
+
+        self.assertEqual(preview.status, "no-unresolved-review")
+        self.assertIsNone(preview.request)
+        self.assertIsNone(preview.plan)
+
+    def test_unresolved_review_can_preview_unique_target_without_mutation(self):
+        session, graph = make_pending_session(theta=0.5)
+        record = session.pending_records[0]
+        before_nodes = tuple(graph.nodes)
+        session.review_unresolved(
+            record,
+            reason="finite review left the mismatch unresolved",
+            assessor="session-test",
+            evidence_refs=("review-1",),
+        )
+
+        preview = session.preview_latest_reconstruction()
+
+        self.assertEqual(preview.status, "target-proposed")
+        self.assertIsNotNone(preview.request)
+        self.assertIsNotNone(preview.plan)
+        self.assertEqual(preview.plan.target_ref, "node-a")
+        self.assertEqual(preview.plan.candidate_refs, ("node-a",))
+        self.assertEqual(tuple(graph.nodes), before_nodes)
+
+    def test_unresolved_review_below_theta_has_no_target_plan(self):
+        session, _ = make_pending_session(theta=10.0)
+        record = session.pending_records[0]
+        session.review_unresolved(
+            record,
+            reason="unresolved but below reconstruction threshold",
+            assessor="session-test",
+        )
+
+        preview = session.preview_latest_reconstruction()
+
+        self.assertEqual(preview.status, "below-reconstruction-threshold")
+        self.assertIsNone(preview.request)
+        self.assertIsNone(preview.plan)
+
     def test_reviewed_record_cannot_be_reviewed_twice(self):
         session, _ = make_pending_session()
         record = session.pending_records[0]
