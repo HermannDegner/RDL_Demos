@@ -10,18 +10,15 @@ export const referenceProfile = Object.freeze({
   description: "Safe fallback coefficients for small reference simulations.",
   boundary: Object.freeze({
     thetaBase: 0.8,
-    thetaMin: 0.28,
-    thetaMax: 2,
-    xiThetaWeight: 0.26,
   }),
   node: Object.freeze({
     reliability: 0.7,
     alignRate: 0.035,
     reliabilityMin: 0.18,
     reliabilityMax: 0.98,
-    xiDecay: 0.94,
-    xiGain: 0.12,
-    xiMax: 1.2,
+    adaptationPressureDecay: 0.94,
+    adaptationPressureGain: 0.12,
+    adaptationPressureMax: 1.2,
   }),
   h: Object.freeze({
     decay: 0.9,
@@ -46,15 +43,13 @@ export const botProfile = Object.freeze({
   boundary: Object.freeze({
     ...referenceProfile.boundary,
     thetaBase: 2,
-    thetaMin: 1.2,
-    xiThetaWeight: 0.18,
   }),
   node: Object.freeze({
     ...referenceProfile.node,
     alignRate: 0.02,
-    xiDecay: 0.88,
-    xiGain: 0.08,
-    xiMax: 1,
+    adaptationPressureDecay: 0.88,
+    adaptationPressureGain: 0.08,
+    adaptationPressureMax: 1,
   }),
   h: Object.freeze({
     ...referenceProfile.h,
