@@ -135,11 +135,12 @@ class CanonicalMigrationSession:
             legacy_respond=legacy_respond,
         )
         if len(self.shadow.turns) >= 2:
-            later = len(self.shadow.turns)
+            earlier_index = self.shadow.turns[-2].index
+            later_index = self.shadow.turns[-1].index
             record = self.controller.assess_pair(
                 shadow=self.shadow,
-                earlier_index=later - 1,
-                later_index=later,
+                earlier_index=earlier_index,
+                later_index=later_index,
             )
             self.assessments.append(record)
         return result
