@@ -175,3 +175,26 @@ export function compareInterpretations(current, later) {
   const reasons = Object.keys(values).filter((key) => values[key] > 0).sort();
   return new MismatchObservation({ values, reasons });
 }
+
+export function legacyLocalDynamicsView(agent) {
+  // Staged compatibility adapter for the historical Living Field runtime.
+  //
+  // These renamed fields preserve the demo's current behaviour while making
+  // their semantic status explicit. None of them is promoted into Core xi/H.
+  // A shallow copy of H is returned so callers cannot mutate the runtime by
+  // editing the view object.
+  if (!agent || typeof agent !== "object") throw new Error("agent must be an object");
+  const localLoad = frozenObject(agent.H ?? {});
+  const adaptationPressure = Number(agent.xi ?? 0);
+  const localLeapThreshold = Number(agent.thetaEffective ?? agent.thetaBase ?? 0);
+  return Object.freeze({
+    localLoad,
+    adaptationPressure,
+    localLeapThreshold,
+    sourceFields: Object.freeze({
+      localLoad: "H",
+      adaptationPressure: "xi",
+      localLeapThreshold: "thetaEffective",
+    }),
+  });
+}
