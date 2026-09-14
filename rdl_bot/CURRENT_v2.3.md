@@ -1,6 +1,6 @@
 # rdl_bot — Core v2.3 migration boundary
 
-Status: **migration in progress / reviewed shadow path operational**  
+Status: **migration in progress / reviewed durable shadow path operational**  
 Normative semantic reference: `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3.
 
 `rdl_bot` は旧RDL世代から継続する会話実験であり、`EFP`、`xi_pool`、`H_pre/H_post` 等のpre-v2.3名がまだ残る。これらを現行Core記号と同一視しない。
@@ -108,7 +108,7 @@ plannerはlegacy Hのhot-nodeを参照しない。executorはtarget選択を行�
 
 `pipeline_v23.py` には explicit review後のend-to-end candidate pathがあるが、default CLIのgraph mutation authorityにはまだ接続していない。
 
-## 5. Opt-in reviewed shadow CLI
+## 5. Opt-in reviewed durable shadow CLI
 
 default CLI:
 
@@ -125,14 +125,48 @@ py cli_v23.py
 py cli_v23.py --seed
 ```
 
-`cli_v23.py` は既存 `main.main()` をそのまま利用し、`respond` と `/v23` 系commandだけをwrapする。user-visible response、legacy feedback、保存、LLM trust、legacy mutation authorityは維持される。
+`cli_v23.py` は既存 `main.main()` をそのまま利用し、`respond` と `/v23` 系commandだけをwrapする。user-visible response、legacy feedback、LLM trust、legacy mutation authorityは維持される。
+
+canonical shadow stateは `data/v23_shadow_state.json` へJSON保存する。
+
+保存対象:
+
+```text
+fixed θ / decay
+canonical H snapshot
+assessment / pending records
+explicit review audit
+last assigned turn id
+```
+
+保存しないもの:
+
+```text
+frozen graph evaluator
+old process-local graph snapshot
+legacy graph-mutation authority
+```
+
+再起動後は `last_turn_id + 1` から新しいprocess-local comparison windowを開始する。旧凍結M_Bを再生成してrestart跨ぎのEを作ることはしない。
+
+```text
+turn N (old process)
+   ↓ restart
+turn N+1 (new process)
+   -> no cross-restart E
+turn N+2
+   -> compare N+1 vs N+2 under frozen M_B(N+1)
+```
+
+旧pending/reviewはaudit・review用途として保持するが、そのtarget planningに必要な旧frozen evaluatorが無ければ `target-evidence-unavailable` で止まる。
 
 ### `/v23`
 
 read-only status。
 
 ```text
-turn count
+turns in current window
+last turn id
 assessment count
 pending count
 review count
@@ -202,6 +236,8 @@ bare bool != sufficient unresolved classification
 reconstruction eligibility != target selection
 target selection != legacy hot-node selection
 shadow review/plan != graph mutation
+restart != permission to recreate old frozen evaluator
+cross-restart E is not formed
 ```
 
 ## 7. Migration order
@@ -211,7 +247,7 @@ shadow review/plan != graph mutation
 3. **PARTIAL** — `xi_pool` 実役割を `UnresolvedInputQueue` として分離。`main.py`内部名とCLI表示はcompatibilityとして残存
 4. **DONE** — unresolved-input queue length -> theta のlive結線を切断
 5. **DONE** — legacy feedback stateとcanonical Hを型・更新経路で分離
-6. **PARTIAL / SHADOW-CUTOVER READY** — canonical authority、resolution policy、controller、gate、target planner、executor、pipeline、migration session、opt-in `cli_v23.py`、explicit resolved/unresolved review、dry-run target planまで実装。**graph mutation authority cutoverのみ未実施**
+6. **PARTIAL / DURABLE SHADOW-CUTOVER READY** — canonical authority、resolution policy、controller、gate、target planner、executor、pipeline、migration session、opt-in `cli_v23.py`、explicit resolved/unresolved review、dry-run target plan、restart-safe JSON persistenceまで実装。**graph mutation authority cutoverのみ未実施**
 7. **AFTER CUTOVER** — 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
 ## 8. Test boundary
@@ -240,6 +276,10 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 - shadow CLI `/v23` はread-only
 - shadow CLI reviewはgraphを変更しない
 - `/v23 plan` はdry-runのみ
+- canonical H / pending / review auditはrestart後も同値復元される
+- turn idはrestart後も単調増加する
+- restart直後はcross-restart Eを作らない
+- 旧turn evidenceのfrozen evaluatorが無ければtargetを捏造しない
 
 ## Formation history
 
