@@ -63,7 +63,7 @@ class CanonicalRuntimeController:
         earlier_index: int,
         later_index: int,
     ) -> RuntimeAssessmentRecord:
-        mismatch = shadow.compare_with_earlier_model(earlier_index, later_index)
+        mismatch = shadow.replay_later_under_earlier_model(earlier_index, later_index)
         if mismatch is None:
             record = RuntimeAssessmentRecord(
                 earlier_index=earlier_index,
