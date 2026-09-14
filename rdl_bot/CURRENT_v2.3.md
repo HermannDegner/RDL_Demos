@@ -1,6 +1,6 @@
 # rdl_bot — Core v2.3 migration boundary
 
-Status: **migration in progress / explicit canonical execution operational**  
+Status: **migration in progress / opt-in canonical action authority operational**  
 Normative semantic reference: `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3.
 
 `rdl_bot` は旧RDL世代から継続する会話実験であり、`EFP`、`xi_pool`、`H_pre/H_post` 等のpre-v2.3名がまだ残る。これらを現行Core記号と同一視しない。
@@ -112,26 +112,63 @@ LLM revision generation
 
 plannerはlegacy Hのhot-nodeを参照しない。executorはtarget選択を行わず、ambiguous / missing / invalid planではmutation callbackを呼ばない。
 
-`mutation_v23.py` は既にcanonical targetだけを受けるLLM revision adapterを持つ。legacy H、hot-node、queue pressureは入力に取らない。
+`mutation_v23.py` はcanonical targetだけを受けるLLM revision adapterを持つ。legacy H、hot-node、queue pressureは入力に取らない。
 
-## 5. Opt-in reviewed durable canonical CLI
+## 5. Runtime entrypoints
 
-default CLI:
+### Default legacy authority
 
 ```bash
 py main.py
 ```
 
-これは現在もlegacy graph-mutation authorityを使う。
+従来互換入口。legacy graph-mutation authorityが残る。
 
-Core v2.3 reviewed CLI:
+### Reviewed canonical CLI
 
 ```bash
 py cli_v23.py
 py cli_v23.py --seed
 ```
 
-`cli_v23.py` は既存 `main.main()` を利用し、canonical観測・review・plan・explicit executeを追加する。user-visible response、legacy feedback、LLM trust、default legacy action authorityは維持される。
+canonical観測・review・plan・explicit `/v23 execute` を追加するが、通常turn中のlegacy leap/correction authorityは維持する。
+
+### Opt-in canonical action-authority CLI
+
+```bash
+py cli_v23_authority.py
+py cli_v23_authority.py --seed
+```
+
+`cli_v23_authority.py` はprocess-localにlegacy `_decide_leap` を無効化する。legacy feedback/load状態は観測・互換のため残るが、**graph reconstructionを認可しない**。
+
+このモードでは:
+
+```text
+ordinary response routing
+legacy feedback recording
+LLM trust / maintenance
+        ↓ 維持
+
+legacy H-based leap/correction
+        ↓ DISABLED
+
+canonical explicit review
+        ↓
+canonical H + fixed θ
+        ↓
+unique canonical target
+        ↓
+/v23 execute
+        ↓
+唯一の再編mutation入口
+```
+
+したがってopt-in authority modeでは、legacy H/hot-nodeからnode revision・quarantineへ入る経路を切り、canonical reviewed targetだけをmutation authorityにできる。
+
+**default `main.py` は変更していない。** これは段階cutoverの実証入口であり、default authorityを無条件に切り替えたものではない。
+
+## 6. Durable canonical state
 
 canonical stateは `data/v23_shadow_state.json` へJSON保存する。
 
@@ -167,6 +204,8 @@ turn N+2
 
 旧pending/reviewはaudit用途として保持する。target planningに必要な旧frozen evaluatorが無ければ `target-evidence-unavailable` で止まる。
 
+## 7. `/v23` commands
+
 ### `/v23`
 
 read-only status。
@@ -186,43 +225,15 @@ latest pending / review / execution
 
 ### `/v23 resolve <reason>`
 
-最新pendingを明示的にresolvedとして閉じる。
-
-```text
-pending -> resolved review
-canonical H increment = 0
-node graph mutation = 0
-```
+最新pendingを明示的にresolvedとして閉じる。canonical H increment = 0、node mutation = 0。
 
 ### `/v23 unresolved <reason>`
 
-最新pendingを明示的にunresolvedとしてcanonical Hへ入れる。
-
-```text
-pending -> unresolved review
-canonical H may increase
-fixed θ eligibility may change
-node graph mutation = 0
-```
-
-assessorは `cli-user`、evidenceには元turn refsと `cli-review:<pair>` を保持する。
+最新pendingを明示的にunresolvedとしてcanonical Hへ入れる。assessorは `cli-user`、元turn refsと `cli-review:<pair>` をevidenceとして保持する。
 
 ### `/v23 plan`
 
-最新のunresolved reviewをgate + target plannerへ通すdry-run。
-
-```text
-no unresolved review
-  -> no-unresolved-review
-
-H < θ
-  -> below-reconstruction-threshold
-
-H >= θ
-  -> target-proposed / target-review-required / target-evidence-unavailable
-```
-
-**dry-run only**。
+最新unresolved reviewをgate + target plannerへ通すdry-run。mutationはしない。
 
 ### `/v23 execute`
 
@@ -243,16 +254,16 @@ mutation_v23 adapter
 安全境界:
 
 ```text
-target missing          -> no mutation
-LLM off / unavailable   -> no mutation
-revision API unavailable-> no mutation
-revision generation fail-> no mutation
-success                 -> old deprecated / new added
+target missing           -> no mutation
+LLM off / unavailable    -> no mutation
+revision API unavailable -> no mutation
+revision generation fail -> no mutation
+success                  -> old deprecated / new added
 ```
 
 成功mutationは同じreviewについてone-shotで、execution auditを永続化するため再起動後も二重実行しない。無変更試行は後で明示的に再試行できる。
 
-## 6. Current fixed boundaries
+## 8. Current fixed boundaries
 
 ```text
 raw input != RIB_B
@@ -274,19 +285,20 @@ execute requires explicit reviewed canonical target
 restart != permission to recreate old frozen evaluator
 cross-restart E is not formed
 successful execution is one-shot per reviewed pair
+opt-in canonical authority mode disables legacy mutation authority
 ```
 
-## 7. Migration order
+## 9. Migration order
 
 1. **DONE** — canonical `InteractionSection / F / F' / E / unresolved H / CoverageState`
 2. **DONE** — pre-update evaluator凍結、later section replay、route identityを含む有限F
 3. **PARTIAL** — `xi_pool` 実役割を `UnresolvedInputQueue` として分離。`main.py`内部名とCLI表示はcompatibilityとして残存
 4. **DONE** — unresolved-input queue length -> theta のlive結線を切断
 5. **DONE** — legacy feedback stateとcanonical Hを型・更新経路で分離
-6. **PARTIAL / EXPLICIT CANONICAL EXECUTION OPERATIONAL** — canonical authority、resolution policy、controller、gate、target planner、executor、mutation adapter、pipeline、durable migration session、opt-in `cli_v23.py`、explicit review、dry-run plan、one-shot `/v23 execute` まで実装。**default `main.py` のaction authority cutoverのみ未実施**
+6. **PARTIAL / OPT-IN AUTHORITY CUTOVER OPERATIONAL** — canonical authority、resolution policy、controller、gate、target planner、executor、mutation adapter、pipeline、durable session、review/plan/execute、`cli_v23_authority.py` によるlegacy leap authority無効化まで実装。**default `main.py` のauthority cutoverのみ未実施**
 7. **AFTER DEFAULT CUTOVER** — 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
-## 8. Test boundary
+## 10. Test boundary
 
 ```bash
 PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py" -v
@@ -319,6 +331,8 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 - turn idはrestart後も単調増加する
 - restart直後はcross-restart Eを作らない
 - 旧turn evidenceのfrozen evaluatorが無ければtargetを捏造しない
+- opt-in authority modeはinstall前のdefault legacy objectを変更しない
+- authority mode install後はlegacy `_decide_leap` がmutationを認可しない
 
 ## Formation history
 
