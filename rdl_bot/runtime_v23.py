@@ -20,6 +20,11 @@ Canonical comparison path::
 The live graph is allowed to change between the two captures.  What must remain
 fixed for canonical E is the evaluator used to form F and F', not the live
 runtime state.  A changed comparison boundary still blocks the comparison.
+
+``index_offset`` allows a restarted migration session to continue assigning
+monotonic turn ids without pretending that a frozen evaluator from the previous
+process still exists.  Cross-restart E is therefore not manufactured: only
+turns actually present in this shadow instance are comparable.
 """
 
 from __future__ import annotations
@@ -162,13 +167,37 @@ def _same_comparison_boundary(first: BoundaryContext, later: BoundaryContext) ->
 
 @dataclass
 class V23ConversationShadow:
-    """Non-authoritative observer of live legacy bot turns."""
+    """Non-authoritative observer of live legacy bot turns.
+
+    ``index_offset`` is the greatest turn id known before this process-local
+    comparison window.  Restored sessions set it to the last persisted turn id
+    and start a fresh window.  Old frozen evaluators are not reconstructed.
+    """
 
     boundary_id: str = "rdl_bot:conversation"
     purpose: str = "observe finite user/bot interaction sections during v2.3 migration"
     question: str = "what finite routing state is produced under the frozen pre-response graph?"
     actor: str = "user"
+    index_offset: int = 0
     turns: list[ShadowTurn] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.index_offset < 0:
+            raise ValueError("index_offset must be non-negative")
+
+    @property
+    def available_turn_indices(self) -> tuple[int, ...]:
+        return tuple(turn.index for turn in self.turns)
+
+    @property
+    def last_assigned_index(self) -> int:
+        return self.turns[-1].index if self.turns else self.index_offset
+
+    def turn_by_index(self, index: int) -> ShadowTurn:
+        for turn in self.turns:
+            if turn.index == index:
+                return turn
+        raise IndexError(f"turn {index} is not available in this process-local shadow window")
 
     def _context(self, observed_at: str) -> BoundaryContext:
         return BoundaryContext(
@@ -181,7 +210,7 @@ class V23ConversationShadow:
 
     def capture_input(self, text: str, graph: Any) -> ShadowTurn:
         observed_at = _utc_now()
-        index = len(self.turns) + 1
+        index = self.index_offset + len(self.turns) + 1
         evaluator = FrozenGraphEvaluator.from_graph(graph)
         section = acquire_text_section(
             section_id=f"turn-{index}:input",
@@ -231,7 +260,12 @@ class V23ConversationShadow:
             response_section=section,
             response_node_id=node_id,
         )
-        self.turns[-1] = completed
+        for position, existing in enumerate(self.turns):
+            if existing.index == turn.index:
+                self.turns[position] = completed
+                break
+        else:
+            raise ValueError("turn does not belong to this shadow window")
         return completed
 
     def compare_inputs(self, earlier_index: int, later_index: int):
@@ -241,8 +275,8 @@ class V23ConversationShadow:
         comparison use :meth:`replay_later_under_earlier_model`.
         """
 
-        earlier = self.turns[earlier_index - 1]
-        later = self.turns[later_index - 1]
+        earlier = self.turn_by_index(earlier_index)
+        later = self.turn_by_index(later_index)
         if earlier.model_ref != later.model_ref:
             return None
         if not _same_comparison_boundary(earlier.input_section.context, later.input_section.context):
@@ -255,10 +289,14 @@ class V23ConversationShadow:
         This is the canonical v2.3 path for ``F'``.  Live graph mutation between
         the two turns is irrelevant because both F and F' are interpreted by the
         evaluator frozen at ``earlier_index``.
+
+        A persisted/restarted session cannot call this method for an old turn
+        because the corresponding frozen evaluator is intentionally not
+        reconstructed.  That prevents false cross-restart E.
         """
 
-        earlier = self.turns[earlier_index - 1]
-        later = self.turns[later_index - 1]
+        earlier = self.turn_by_index(earlier_index)
+        later = self.turn_by_index(later_index)
         if not _same_comparison_boundary(earlier.input_section.context, later.input_section.context):
             return None
         replayed_later = earlier.model_evaluator.interpret(later.input_section)
