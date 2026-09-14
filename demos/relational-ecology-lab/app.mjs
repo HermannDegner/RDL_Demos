@@ -6,6 +6,7 @@ import {
   clamp,
   normalizeSeed,
 } from "./core.mjs";
+import "./local_aliases.mjs";
 
 const canvas = document.querySelector("#world-canvas");
 const context = canvas.getContext("2d");
@@ -26,8 +27,8 @@ const elements = {
   decisionHeading: document.querySelector("#decision-heading"),
   decisionReason: document.querySelector("#decision-reason"),
   predictionValues: document.querySelector("#prediction-values"),
-  thetaValue: document.querySelector("#theta-value"),
-  xiValue: document.querySelector("#xi-value"),
+  localThresholdValue: document.querySelector("#theta-value"),
+  adaptationPressureValue: document.querySelector("#xi-value"),
   reliabilityValues: document.querySelector("#reliability-values"),
   leapCount: document.querySelector("#leap-count"),
   eventLog: document.querySelector("#event-log"),
@@ -64,7 +65,7 @@ const needMeters = [
   },
 ];
 
-const hMeters = [
+const loadMeters = [
   {
     label: document.querySelector("#h-1-label"),
     value: document.querySelector("#h-resource-value"),
@@ -715,14 +716,14 @@ function updateInterface(force = false) {
     setMeter(needMeters[index], needs[index]?.value ?? 0);
   }
 
-  const hMaximum = Math.max(1.05, agent.thetaEffective * 1.25);
-  for (let index = 0; index < hMeters.length; index += 1) {
+  const loadMaximum = Math.max(1.05, agent.localLeapThreshold * 1.25);
+  for (let index = 0; index < loadMeters.length; index += 1) {
     const dimension = agent.profile.errorDimensions[index];
-    hMeters[index].label.textContent = dimension;
-    setMeter(hMeters[index], agent.H[dimension], hMaximum);
+    loadMeters[index].label.textContent = dimension;
+    setMeter(loadMeters[index], agent.localLoad[dimension], loadMaximum);
   }
-  elements.thetaValue.textContent = agent.thetaEffective.toFixed(2);
-  elements.xiValue.textContent = agent.xi.toFixed(2);
+  elements.localThresholdValue.textContent = agent.localLeapThreshold.toFixed(2);
+  elements.adaptationPressureValue.textContent = agent.adaptationPressure.toFixed(2);
   elements.reliabilityValues.textContent = agent.profile.errorDimensions
     .map((dimension) => (
       `${agent.profile.dimensionLabels[dimension]} ${agent.reliability[dimension].toFixed(2)}`
