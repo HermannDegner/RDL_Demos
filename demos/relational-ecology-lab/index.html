@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta
     name="description"
-    content="RabbitとPredatorを共通RelationalAgent型で動かし、知覚制約、地形、個体別記憶、H_vecとLeapを検証するRDL生態系実験。"
+    content="RabbitとPredatorを共通RelationalAgent型で動かし、知覚制約、地形、個体別記憶、ローカル予測負荷とLeapを検証するRDL生態系実験。"
   />
   <title>RDL Living Field — 統合生態系</title>
   <link rel="stylesheet" href="./style.css" />
@@ -27,7 +27,7 @@
         <h1>RDL Living Field</h1>
         <p class="lead">
           見える世界、個体が予測している世界、観測者だけが知る記録を分離した統合生態系。
-          資源の枯渇、視界を切る地形、互いの読み違いが予測差を生み、RabbitとPredatorそれぞれのH<sub>vec</sub>が閾値を越えると行動仮説が組み替わります。
+          資源の枯渇、視界を切る地形、互いの読み違いが予測差を生み、RabbitとPredatorそれぞれのローカル予測負荷が閾値を越えると行動仮説が組み替わります。
         </p>
       </div>
       <dl class="hero-facts">
@@ -160,8 +160,8 @@
 
         <section class="panel-section h-section" aria-labelledby="h-heading">
           <div class="panel-heading">
-            <h3 id="h-heading">H<sub>vec</sub> / 予測差の蓄積</h3>
-            <span>閾値 <output id="theta-value">0.00</output></span>
+            <h3 id="h-heading">ローカル予測負荷</h3>
+            <span>ローカル閾値 <output id="theta-value">0.00</output></span>
           </div>
           <div class="meter-list">
             <div class="meter-row">
@@ -179,8 +179,8 @@
           </div>
           <div class="xi-row">
             <div>
-              <span class="xi-symbol">ξ</span>
-              <span>未説明圧</span>
+              <span class="xi-symbol">P</span>
+              <span>適応圧（デモ固有）</span>
             </div>
             <strong id="xi-value">0.00</strong>
           </div>
@@ -241,7 +241,7 @@
           <p>Rabbitは食・水・危険を、Predatorは獲物位置と捕食結果を別々に記憶します。両者とも、知覚と実際の結果だけで更新します。</p>
           <ul>
             <li>候補行動の価値</li>
-            <li>E → H<sub>vec</sub> → Leap</li>
+            <li>local error → local load → local Leap</li>
             <li>記憶は非共有</li>
           </ul>
         </article>
@@ -263,7 +263,7 @@
   </main>
 
   <footer class="page-footer">
-    <p>RDL Living Field · reproduction is intentionally deferred until the core causal loop is inspectable.</p>
+    <p>RDL Living Field · current Core semantics: RIB_B → F/F' → Δ(F,F') → unresolved H. Legacy local controls remain staged for migration.</p>
     <p><kbd>Space</kbd> で実行 / 一時停止</p>
   </footer>
 </body>
