@@ -8,6 +8,11 @@ state.
 A target is auto-proposed only when all concrete canonical evidence resolves to
 one unique node under the same earlier frozen evaluator.  Ambiguous or missing
 evidence remains review-required.
+
+Restored sessions may retain review/pending records from an earlier process while
+starting a fresh shadow comparison window.  Old frozen evaluators are not
+recreated.  Therefore this planner only uses turn ids actually available in the
+current process-local shadow window.
 """
 
 from __future__ import annotations
@@ -70,7 +75,8 @@ class CanonicalTargetPlanner:
             raise TypeError("request must be a ReconstructionRequest")
 
         indices = _turn_indices(request)
-        valid_indices = tuple(index for index in indices if 1 <= index <= len(shadow.turns))
+        available = set(shadow.available_turn_indices)
+        valid_indices = tuple(index for index in indices if index in available)
         if not valid_indices:
             return ReconstructionTargetPlan(
                 status="target-evidence-unavailable",
@@ -79,11 +85,11 @@ class CanonicalTargetPlanner:
                 evidence_turns=(),
             )
 
-        earlier = shadow.turns[min(valid_indices) - 1]
+        earlier = shadow.turn_by_index(min(valid_indices))
         evaluator = earlier.model_evaluator
         candidates: list[str] = []
         for index in valid_indices:
-            turn = shadow.turns[index - 1]
+            turn = shadow.turn_by_index(index)
             ref = _candidate_ref(evaluator, turn.input_section)
             if ref is not None and ref not in candidates:
                 candidates.append(ref)
