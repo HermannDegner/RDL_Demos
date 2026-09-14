@@ -11,6 +11,28 @@ export function dimensionConfig(dimensions, value) {
   return { ...dimensionState(dimensions, 0), ...value };
 }
 
+export class RIBSection {
+  constructor({
+    id,
+    boundaryId,
+    values,
+    role = "observation",
+    provenance = null,
+  }) {
+    if (!id) throw new Error("RIBSection requires an id");
+    if (!boundaryId) throw new Error("RIBSection requires a boundaryId");
+    if (!values || typeof values !== "object") {
+      throw new Error("RIBSection requires finite values");
+    }
+    this.id = id;
+    this.boundaryId = boundaryId;
+    this.role = role;
+    this.values = Object.freeze({ ...values });
+    this.provenance = provenance;
+    Object.freeze(this);
+  }
+}
+
 export class Boundary {
   constructor({
     id = "B",
@@ -21,9 +43,6 @@ export class Boundary {
     observer = "observer",
     evaluation = null,
     thetaBase = 1,
-    thetaMin = 0.2,
-    thetaMax = 2,
-    xiThetaWeight = 0.26,
     interpreter = null,
   }) {
     if (!Array.isArray(dimensions) || dimensions.length === 0) {
@@ -37,19 +56,40 @@ export class Boundary {
     this.observer = observer;
     this.evaluation = evaluation;
     this.thetaBase = thetaBase;
-    this.thetaMin = thetaMin;
-    this.thetaMax = thetaMax;
-    this.xiThetaWeight = xiThetaWeight;
     this.interpreter = interpreter;
   }
 
-  thetaEffective(xi = 0) {
-    return clamp(this.thetaBase - xi * this.xiThetaWeight, this.thetaMin, this.thetaMax);
+  section(values, {
+    id = `${this.id}:section`,
+    role = "observation",
+    provenance = null,
+  } = {}) {
+    const selected = {};
+    for (const dimension of this.dimensions) {
+      if (Object.hasOwn(values ?? {}, dimension)) selected[dimension] = values[dimension];
+    }
+    return new RIBSection({
+      id,
+      boundaryId: this.id,
+      values: selected,
+      role,
+      provenance,
+    });
   }
 
-  interpret(mbNode, efp) {
-    if (this.interpreter) return this.interpreter(mbNode, efp, this);
-    return mbNode.interpret(efp);
+  threshold() {
+    return this.thetaBase;
+  }
+
+  interpret(mbNode, ribSection) {
+    if (!(ribSection instanceof RIBSection)) {
+      throw new Error("Boundary.interpret requires a RIBSection");
+    }
+    if (ribSection.boundaryId !== this.id) {
+      throw new Error("RIBSection belongs to a different Boundary");
+    }
+    if (this.interpreter) return this.interpreter(mbNode, ribSection, this);
+    return mbNode.interpret(ribSection);
   }
 }
 
@@ -68,11 +108,18 @@ export class HVector {
     this.residualAfterLeap = residualAfterLeap;
   }
 
-  record(error) {
+  recordUnresolved(error) {
     for (const dimension of this.dimensions) {
       const value = Math.abs(error[dimension] ?? 0);
       this.values[dimension] = this.values[dimension] * this.decay[dimension]
         + value * this.gain[dimension];
+    }
+    return this.snapshot();
+  }
+
+  dissipateTick() {
+    for (const dimension of this.dimensions) {
+      this.values[dimension] *= this.decay[dimension];
     }
     return this.snapshot();
   }
@@ -105,13 +152,13 @@ export class LeapEngine {
   maybeLeap(node, tick = 0) {
     if (node.leapCooldown > 0) return null;
     const [dimension, pressure] = node.h.strongest();
-    const threshold = node.boundary.thetaEffective(node.xi);
+    const threshold = node.boundary.threshold();
     if (pressure < threshold) return null;
 
     const handler = this.handlers[dimension] ?? this.handlers.default;
     const result = handler
       ? handler({ node, dimension, pressure, threshold, tick })
-      : { title: `Leap: ${dimension}`, detail: "M_B was reorganized by accumulated H" };
+      : { title: `Leap: ${dimension}`, detail: "M_B reconstruction candidate from unresolved H" };
 
     node.phase = "M_delta";
     node.h.retainAfterLeap();
@@ -138,12 +185,11 @@ export class MBNode {
     reliabilityMin = 0.18,
     reliabilityMax = 0.98,
     h = null,
-    xi = 0,
-    xiDecay = 0.94,
-    xiGain = 0.12,
-    xiMax = 1.2,
+    adaptationPressure = 0,
+    adaptationPressureDecay = 0.94,
+    adaptationPressureGain = 0.12,
+    adaptationPressureMax = 1.2,
     leapEngine = new LeapEngine(),
-    projection = null,
   }) {
     if (!id) throw new Error("MBNode requires an id");
     if (!(boundary instanceof Boundary)) throw new Error("MBNode requires a Boundary");
@@ -155,14 +201,14 @@ export class MBNode {
     this.reliabilityMin = reliabilityMin;
     this.reliabilityMax = reliabilityMax;
     this.h = h ?? new HVector({ dimensions: this.dimensions });
-    this.xi = xi;
-    this.xiDecay = xiDecay;
-    this.xiGain = xiGain;
-    this.xiMax = xiMax;
+    this.adaptationPressure = adaptationPressure;
+    this.adaptationPressureDecay = adaptationPressureDecay;
+    this.adaptationPressureGain = adaptationPressureGain;
+    this.adaptationPressureMax = adaptationPressureMax;
     this.leapEngine = leapEngine;
-    this.projection = projection;
     this.phase = "M_act";
-    this.lastF = dimensionState(this.dimensions);
+    this.lastF = null;
+    this.lastFPrime = null;
     this.lastError = dimensionState(this.dimensions);
     this.leapCount = 0;
     this.leapCooldown = 0;
@@ -170,32 +216,26 @@ export class MBNode {
   }
 
   beginTick() {
-    this.xi *= this.xiDecay;
+    this.adaptationPressure *= this.adaptationPressureDecay;
     if (this.leapCooldown > 0) this.leapCooldown -= 1;
     if (this.phase === "M_delta") this.phase = "M_act";
   }
 
-  interpret(efp) {
+  interpret(ribSection, reliability = this.reliability) {
+    if (!(ribSection instanceof RIBSection)) {
+      throw new Error("MBNode.interpret requires a RIBSection");
+    }
     const f = {};
     for (const dimension of this.dimensions) {
-      f[dimension] = clamp((efp[dimension] ?? 0) * this.reliability[dimension]);
+      f[dimension] = clamp((ribSection.values[dimension] ?? 0) * reliability[dimension]);
     }
     return f;
   }
 
-  project(previousF = this.lastF) {
-    if (this.projection) return this.projection(this, previousF);
-    const projected = {};
-    for (const dimension of this.dimensions) {
-      projected[dimension] = clamp((previousF[dimension] ?? 0) * this.reliability[dimension]);
-    }
-    return projected;
-  }
-
-  compare(predictedF, actualF) {
+  compare(f, fPrime) {
     const error = {};
     for (const dimension of this.dimensions) {
-      error[dimension] = Math.abs((actualF[dimension] ?? 0) - (predictedF[dimension] ?? 0));
+      error[dimension] = Math.abs((fPrime[dimension] ?? 0) - (f[dimension] ?? 0));
     }
     return error;
   }
@@ -217,31 +257,53 @@ export class MBNode {
     };
   }
 
-  update({ efp = null, actualF = null, predictedF = null, tick = 0 } = {}) {
+  compareSections({
+    currentSection,
+    laterSection,
+    unresolved = true,
+    adapt = true,
+    tick = 0,
+  } = {}) {
+    if (!(currentSection instanceof RIBSection) || !(laterSection instanceof RIBSection)) {
+      throw new Error("compareSections requires currentSection and laterSection RIBSection values");
+    }
     this.beginTick();
-    const interpretedF = efp ? this.boundary.interpret(this, efp) : null;
-    const nextF = actualF ?? interpretedF;
-    if (!nextF) throw new Error("MBNode.update requires efp or actualF");
 
-    const prediction = predictedF ?? this.project(this.lastF);
-    const error = this.compare(prediction, nextF);
-    this.lastF = { ...nextF };
-    this.lastError = error;
-    this.h.record(error);
-    const dMB = this.updateReliability(error);
+    // Freeze the self-side section for both interpretations. Any local adaptive
+    // update happens only after F/F' and E have been established.
+    const frozenReliability = { ...this.reliability };
+    const F = this.interpret(currentSection, frozenReliability);
+    const FPrime = this.interpret(laterSection, frozenReliability);
+    const E = this.compare(F, FPrime);
 
-    const largestError = Math.max(...Object.values(error));
-    this.xi = clamp(this.xi + largestError * this.xiGain, 0, this.xiMax);
+    if (unresolved) this.h.recordUnresolved(E);
+    else this.h.dissipateTick();
+
+    const dMB = adapt
+      ? this.updateReliability(E)
+      : { previous: frozenReliability, current: { ...this.reliability } };
+
+    const largestError = Math.max(0, ...Object.values(E));
+    this.adaptationPressure = clamp(
+      this.adaptationPressure + largestError * this.adaptationPressureGain,
+      0,
+      this.adaptationPressureMax,
+    );
+
+    this.lastF = { ...F };
+    this.lastFPrime = { ...FPrime };
+    this.lastError = { ...E };
 
     const leap = this.leapEngine.maybeLeap(this, tick);
     return {
-      F: { ...nextF },
-      predictedF: prediction,
-      E: error,
+      F: { ...F },
+      FPrime: { ...FPrime },
+      E: { ...E },
       H: this.h.snapshot(),
+      unresolved,
       dMB,
-      xi: this.xi,
-      thetaEffective: this.boundary.thetaEffective(this.xi),
+      adaptationPressure: this.adaptationPressure,
+      theta: this.boundary.threshold(),
       phase: this.phase,
       leap,
     };
@@ -253,11 +315,12 @@ export class MBNode {
       boundary: this.boundary.id,
       phase: this.phase,
       reliability: { ...this.reliability },
-      F: { ...this.lastF },
+      F: this.lastF ? { ...this.lastF } : null,
+      FPrime: this.lastFPrime ? { ...this.lastFPrime } : null,
       E: { ...this.lastError },
       H: this.h.snapshot(),
-      xi: this.xi,
-      thetaEffective: this.boundary.thetaEffective(this.xi),
+      adaptationPressure: this.adaptationPressure,
+      theta: this.boundary.threshold(),
       leapCount: this.leapCount,
     };
   }
@@ -276,7 +339,7 @@ export class MBGraph {
     return node;
   }
 
-  connect(from, to, { type = "W_ij", weight = 1, label = "" } = {}) {
+  connect(from, to, { type = "relation", weight = 1, label = "" } = {}) {
     if (!this.nodes.has(from) || !this.nodes.has(to)) {
       throw new Error("MBGraph.connect requires existing node ids");
     }
