@@ -17,6 +17,8 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: rdl_bot:.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
