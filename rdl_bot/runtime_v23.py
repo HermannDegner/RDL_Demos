@@ -87,18 +87,30 @@ def frozen_graph_model_ref(graph: Any) -> str:
 
 
 def _search_interpreter(graph: Any) -> Callable[[InteractionSection], dict[str, float]]:
-    """Create a routing-state interpreter over one supplied graph state."""
+    """Create a finite routing-state interpreter over one supplied graph state.
+
+    Match class and confidence alone are insufficient: two different nodes can
+    both be exact matches with the same confidence.  The finite F therefore also
+    carries a one-hot-like route dimension ``route:<node-id>``.  This is not a
+    claim that a node id is a Core primitive; it is a bot-local coordinate that
+    preserves which finite route the frozen evaluator selected.
+    """
 
     def evaluate(section: InteractionSection) -> dict[str, float]:
         text = str(section.payload.get("text", ""))
         node, match_type, nearest = graph.search(text)
         candidate = node if node is not None else nearest
-        return {
+        values: dict[str, float] = {
             "exact": 1.0 if match_type == "exact" else 0.0,
             "partial": 1.0 if match_type == "partial" else 0.0,
             "miss": 1.0 if match_type == "miss" else 0.0,
             "candidate_confidence": float(getattr(candidate, "confidence", 0.0)) if candidate else 0.0,
         }
+        if candidate is not None:
+            candidate_id = str(getattr(candidate, "id", "")).strip()
+            if candidate_id:
+                values[f"route:{candidate_id}"] = 1.0
+        return values
 
     return evaluate
 
