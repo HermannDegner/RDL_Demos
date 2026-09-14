@@ -1,8 +1,13 @@
 // Read-only, opt-in comparison of normalized decision-window observations.
 // This finite reliability-weighted evaluator is NOT the full agent policy.
-// Temporal differences are pending evidence, not prediction failures or Core H.
+// Temporal differences require explicit assessment before they can be treated
+// as unresolved mismatch; no assessment in this module mutates action policy.
 import {
-  BoundaryContext, acquireInteractionSection, interpretSection, compareInterpretations,
+  BoundaryContext,
+  acquireInteractionSection,
+  assessMismatch,
+  compareInterpretations,
+  interpretSection,
 } from "./v23_state.mjs";
 
 export class LivingFieldObserver {
@@ -14,9 +19,10 @@ export class LivingFieldObserver {
     this.samples = 0;
     this.comparisons = 0;
     this.missing = 0;
+    this.assessmentCounts = {};
   }
 
-  capture({ tick, observed, reliability }) {
+  capture({ tick, observed, reliability, assessment = null }) {
     const values = {};
     const coefficients = {};
     for (const key of this.dimensions) {
@@ -52,10 +58,19 @@ export class LivingFieldObserver {
       const F = interpretSection(earlier.section, { modelRef: earlier.modelRef, interpreter });
       const FPrime = interpretSection(section, { modelRef: earlier.modelRef, interpreter });
       const E = compareInterpretations(F, FPrime);
+      const EAssessment = assessMismatch(E, assessment ?? {});
       this.comparisons += 1;
+      this.assessmentCounts[EAssessment.status] =
+        (this.assessmentCounts[EAssessment.status] ?? 0) + 1;
       this.latest = Object.freeze({
-        status: E.magnitude === 0 ? "zero-difference" : "pending-assessment",
-        tick, earlierSection: earlier.section, laterSection: section, F, FPrime, E,
+        status: EAssessment.status,
+        assessment: EAssessment,
+        tick,
+        earlierSection: earlier.section,
+        laterSection: section,
+        F,
+        FPrime,
+        E,
       });
     } else {
       this.latest = Object.freeze({ status: "window-started", tick, section });
@@ -66,9 +81,13 @@ export class LivingFieldObserver {
 
   snapshot() {
     return Object.freeze({
-      agentRef: this.agentRef, dimensions: this.dimensions,
-      samples: this.samples, comparisons: this.comparisons,
-      missing: this.missing, latest: this.latest,
+      agentRef: this.agentRef,
+      dimensions: this.dimensions,
+      samples: this.samples,
+      comparisons: this.comparisons,
+      missing: this.missing,
+      assessmentCounts: Object.freeze({ ...this.assessmentCounts }),
+      latest: this.latest,
     });
   }
 }
