@@ -189,7 +189,7 @@ class LegacyFeedbackLoadState:
         return (
             f"legacy_pre={max_pre:.2f}  legacy_post={max_post:.2f}  "
             f"local_theta={self.theta:.2f}  unresolved_input_pressure={pressure:.2f}  "
-            f"theta_eff≈{self.theta_eff(pressure):.2f}"
+            f"θ_eff≈{self.theta_eff(pressure):.2f}"
         )
 
     def hot_nodes(self, top: int = 3) -> list[tuple[str, float]]:
