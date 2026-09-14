@@ -14,3 +14,15 @@ jobs:
           node-version: 22
       - name: Run Node tests
         run: node --test tests/*.test.mjs
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run rdl_bot tests
+        run: python -m unittest discover -s rdl_bot/tests -p "test_*.py" -v
+      - name: Run rdl_village regression
+        run: python -m rdl_village.test_regression
