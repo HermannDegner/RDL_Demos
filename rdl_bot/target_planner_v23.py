@@ -77,12 +77,14 @@ class CanonicalTargetPlanner:
         indices = _turn_indices(request)
         available = set(shadow.available_turn_indices)
         valid_indices = tuple(index for index in indices if index in available)
-        if not valid_indices:
+        # Do not replace missing earlier evidence with a later frozen evaluator.
+        # Every cited turn must be available before deriving a target.
+        if not indices or len(valid_indices) != len(indices):
             return ReconstructionTargetPlan(
                 status="target-evidence-unavailable",
                 target_ref=None,
                 candidate_refs=(),
-                evidence_turns=(),
+                evidence_turns=valid_indices,
             )
 
         earlier = shadow.turn_by_index(min(valid_indices))

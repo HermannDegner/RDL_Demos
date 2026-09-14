@@ -4,6 +4,8 @@ import io
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 from contextlib import redirect_stdout
 
 from cli_v23 import install_shadow_session
@@ -98,6 +100,35 @@ def installed_pending_session(theta=0.5):
 
 
 class V23ShadowCliTests(unittest.TestCase):
+    def test_revision_api_failure_is_audited_without_mutation_and_retryable(self):
+        legacy, session, graph = installed_pending_session()
+        create = Mock(side_effect=TimeoutError("external request timed out"))
+        llm = SimpleNamespace(mode="on", available=lambda: True,
+                              client=SimpleNamespace(messages=SimpleNamespace(create=create)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "state.json")
+            # Add persistence to the session that already holds the turn pair.
+            install_shadow_session(legacy, session=session, state_path=path)
+            with redirect_stdout(io.StringIO()):
+                legacy.handle_command("/v23 unresolved reviewed mismatch", llm, graph)
+                before_h = session.controller.authority.h_snapshot()
+                legacy.handle_command("/v23 execute", llm, graph)
+            self.assertEqual(tuple(graph.nodes), ("node-a",))
+            self.assertEqual(graph.node.status, "active")
+            self.assertEqual(graph.node.confidence, 0.8)
+            self.assertEqual(graph.saved, 0)
+            self.assertEqual(graph.relation_updates, [])
+            self.assertEqual(session.controller.authority.h_snapshot(), before_h)
+            restored = load_session(path)
+            self.assertEqual(len(restored.executions), 1)
+            self.assertFalse(restored.executions[0].mutated)
+            self.assertEqual(restored.executions[0].mutation_status,
+                             "not-mutated-revision-generation-failed")
+            with redirect_stdout(io.StringIO()):
+                legacy.handle_command("/v23 execute", _LLM(revised=_Node("node-b")), graph)
+            self.assertTrue(session.executions[-1].mutated)
+            self.assertIn("node-b", graph.nodes)
+
     def test_install_preserves_legacy_response_and_call_count(self):
         legacy = _LegacyMain()
         session = install_shadow_session(

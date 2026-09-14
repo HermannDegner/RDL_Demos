@@ -20,6 +20,18 @@ def request():
 
 
 class CanonicalExecutorTests(unittest.TestCase):
+    def test_proposed_label_cannot_override_multiple_candidates(self):
+        plan = ReconstructionTargetPlan(
+            status="target-proposed", target_ref="node-a",
+            candidate_refs=("node-a", "node-b"), evidence_turns=(1, 2),
+        )
+        calls = []
+        result = CanonicalReconstructionExecutor().execute(
+            request(), plan, mutate=lambda *args: calls.append(args),
+        )
+        self.assertEqual(result.status, "not-executed-invalid-target-plan")
+        self.assertEqual(calls, [])
+
     def test_unambiguous_plan_calls_injected_mutation(self):
         req = request()
         plan = ReconstructionTargetPlan(

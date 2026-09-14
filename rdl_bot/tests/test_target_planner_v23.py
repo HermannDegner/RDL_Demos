@@ -53,6 +53,18 @@ def make_request(*evidence_refs):
 
 
 class CanonicalTargetPlannerTests(unittest.TestCase):
+    def test_partial_evidence_does_not_rebase_on_available_later_evaluator(self):
+        graph = _Graph()
+        shadow = V23ConversationShadow(index_offset=1)
+        shadow.capture_input("alpha", graph)  # only turn-2 is available
+        request = make_request("turn-1", "turn-2")
+
+        plan = CanonicalTargetPlanner().plan(request, shadow=shadow)
+
+        self.assertEqual(plan.status, "target-evidence-unavailable")
+        self.assertIsNone(plan.target_ref)
+        self.assertEqual(plan.candidate_refs, ())
+
     def test_same_frozen_candidate_is_proposed(self):
         graph = _Graph()
         shadow = V23ConversationShadow()

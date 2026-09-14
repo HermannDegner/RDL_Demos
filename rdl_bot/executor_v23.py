@@ -54,7 +54,7 @@ class CanonicalReconstructionExecutor:
                 target_ref=None,
             )
 
-        if plan.target_ref not in plan.candidate_refs:
+        if plan.candidate_refs != (plan.target_ref,):
             return ReconstructionExecution(
                 status="not-executed-invalid-target-plan",
                 target_ref=None,

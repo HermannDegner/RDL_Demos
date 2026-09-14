@@ -58,7 +58,16 @@ def make_llm_revision_mutation(graph: Any, llm: Any) -> Callable[[str, Reconstru
                 target_ref=target_ref,
             )
 
-        revised = generate_canonical_revision(llm, target, request)
+        # Contain generation/API failures before any graph writes. Do not catch
+        # graph.add/update/save errors here: they may represent partial writes
+        # and must not be reported as a safely retryable no-mutation attempt.
+        try:
+            revised = generate_canonical_revision(llm, target, request)
+        except Exception:
+            return CanonicalMutationResult(
+                status="not-mutated-revision-generation-failed",
+                target_ref=target_ref,
+            )
         if revised is None:
             return CanonicalMutationResult(
                 status="not-mutated-revision-generation-failed",
