@@ -4,19 +4,27 @@ This adapter observes real conversation turns without changing the legacy
 ``main.respond`` decision path.  It gives the migration a concrete acquisition
 boundary while preserving all existing CLI behaviour.
 
-Important semantic boundary:
+Canonical comparison path::
 
-- raw user text != RIB_B;
-- ``InteractionSection`` is the finite acquired section;
-- F is formed only after the section is acquired;
-- two F states are comparable only when the frozen pre-update ``model_ref`` is
-  identical;
-- legacy miss/deny/silence counters and unresolved-input pressure are not
-  promoted into canonical H or Core xi here.
+    capture t
+      -> freeze the pre-response graph-side evaluator M_B(t)
+      -> acquire RIB_B(t)
+      -> F = interp(M_B(t), RIB_B(t))
+
+    capture t+Delta
+      -> acquire RIB_B(t+Delta)
+      -> replay that later section through the *frozen earlier evaluator*
+      -> F' = interp(M_B(t), RIB_B(t+Delta))
+      -> Delta(F, F')
+
+The live graph is allowed to change between the two captures.  What must remain
+fixed for canonical E is the evaluator used to form F and F', not the live
+runtime state.  A changed comparison boundary still blocks the comparison.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -50,9 +58,14 @@ def _utc_now() -> str:
 
 
 def _node_snapshot(node: Any) -> dict[str, Any]:
+    """Fields that can materially affect the finite routing evaluator."""
+
     return {
         "id": str(getattr(node, "id", "")),
+        "inputs": tuple(str(value) for value in getattr(node, "inputs", ())),
+        "relations": tuple(str(value) for value in getattr(node, "relations", ())),
         "status": str(getattr(node, "status", "")),
+        "source": str(getattr(node, "source", "")),
         "phase": str(getattr(node, "phase", "")),
         "confidence": round(float(getattr(node, "confidence", 0.0)), 12),
         "usage_count": int(getattr(node, "usage_count", 0)),
@@ -60,11 +73,10 @@ def _node_snapshot(node: Any) -> dict[str, Any]:
 
 
 def frozen_graph_model_ref(graph: Any) -> str:
-    """Return a deterministic reference for the pre-response graph state.
+    """Return a deterministic reference for a finite graph-side evaluator state.
 
     This is an implementation fingerprint, not an identity claim that the graph
-    as a whole *is* Core M_B.  It only pins which finite graph-side evaluator
-    state was used for one F observation.
+    as a whole *is* Core M_B.
     """
 
     nodes = getattr(graph, "nodes", {})
@@ -75,7 +87,7 @@ def frozen_graph_model_ref(graph: Any) -> str:
 
 
 def _search_interpreter(graph: Any) -> Callable[[InteractionSection], dict[str, float]]:
-    """Freeze a finite routing evaluator for one pre-response graph state."""
+    """Create a routing-state interpreter over one supplied graph state."""
 
     def evaluate(section: InteractionSection) -> dict[str, float]:
         text = str(section.payload.get("text", ""))
@@ -92,13 +104,48 @@ def _search_interpreter(graph: Any) -> Callable[[InteractionSection], dict[str, 
 
 
 @dataclass(frozen=True)
+class FrozenGraphEvaluator:
+    """Deep-copied finite evaluator representing the pre-update M_B-side state."""
+
+    model_ref: str
+    graph_snapshot: Any
+
+    @classmethod
+    def from_graph(cls, graph: Any) -> "FrozenGraphEvaluator":
+        snapshot = copy.deepcopy(graph)
+        return cls(
+            model_ref=frozen_graph_model_ref(snapshot),
+            graph_snapshot=snapshot,
+        )
+
+    def interpret(self, section: InteractionSection) -> InterpretationState:
+        return interpret_section(
+            section,
+            model_ref=self.model_ref,
+            interpreter=_search_interpreter(self.graph_snapshot),
+        )
+
+
+@dataclass(frozen=True)
 class ShadowTurn:
     index: int
     model_ref: str
+    model_evaluator: FrozenGraphEvaluator
     input_section: InteractionSection
     input_state: InterpretationState
     response_section: Optional[InteractionSection] = None
     response_node_id: Optional[str] = None
+
+
+def _same_comparison_boundary(first: BoundaryContext, later: BoundaryContext) -> bool:
+    """Compare B-defining fields while allowing observation time to advance."""
+
+    return (
+        first.boundary_id == later.boundary_id
+        and first.purpose == later.purpose
+        and first.question == later.question
+        and dict(first.conditions) == dict(later.conditions)
+    )
 
 
 @dataclass
@@ -123,7 +170,7 @@ class V23ConversationShadow:
     def capture_input(self, text: str, graph: Any) -> ShadowTurn:
         observed_at = _utc_now()
         index = len(self.turns) + 1
-        model_ref = frozen_graph_model_ref(graph)
+        evaluator = FrozenGraphEvaluator.from_graph(graph)
         section = acquire_text_section(
             section_id=f"turn-{index}:input",
             text=text,
@@ -137,14 +184,11 @@ class V23ConversationShadow:
             ),
             metadata={"turn_index": index},
         )
-        state = interpret_section(
-            section,
-            model_ref=model_ref,
-            interpreter=_search_interpreter(graph),
-        )
+        state = evaluator.interpret(section)
         turn = ShadowTurn(
             index=index,
-            model_ref=model_ref,
+            model_ref=evaluator.model_ref,
+            model_evaluator=evaluator,
             input_section=section,
             input_state=state,
         )
@@ -169,6 +213,7 @@ class V23ConversationShadow:
         completed = ShadowTurn(
             index=turn.index,
             model_ref=turn.model_ref,
+            model_evaluator=turn.model_evaluator,
             input_section=turn.input_section,
             input_state=turn.input_state,
             response_section=section,
@@ -178,13 +223,34 @@ class V23ConversationShadow:
         return completed
 
     def compare_inputs(self, earlier_index: int, later_index: int):
-        """Compare two user-input F states only when the pre-update model matches."""
+        """Strict comparison of already-formed F states with identical model refs.
+
+        Kept as a diagnostic compatibility method.  For the canonical temporal
+        comparison use :meth:`replay_later_under_earlier_model`.
+        """
 
         earlier = self.turns[earlier_index - 1]
         later = self.turns[later_index - 1]
         if earlier.model_ref != later.model_ref:
             return None
+        if not _same_comparison_boundary(earlier.input_section.context, later.input_section.context):
+            return None
         return compare_interpretations(earlier.input_state, later.input_state)
+
+    def replay_later_under_earlier_model(self, earlier_index: int, later_index: int):
+        """Form F' from the later RIB_B using the earlier frozen evaluator.
+
+        This is the canonical v2.3 path for ``F'``.  Live graph mutation between
+        the two turns is irrelevant because both F and F' are interpreted by the
+        evaluator frozen at ``earlier_index``.
+        """
+
+        earlier = self.turns[earlier_index - 1]
+        later = self.turns[later_index - 1]
+        if not _same_comparison_boundary(earlier.input_section.context, later.input_section.context):
+            return None
+        replayed_later = earlier.model_evaluator.interpret(later.input_section)
+        return compare_interpretations(earlier.input_state, replayed_later)
 
 
 def respond_with_shadow(
