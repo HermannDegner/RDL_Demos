@@ -24,11 +24,15 @@ class ResolutionPolicyTests(unittest.TestCase):
     def test_nonzero_mismatch_stays_pending_by_default(self):
         mismatch = MismatchObservation(values={"route": 1.0})
 
-        candidate = classify_mismatch(mismatch)
+        candidate = classify_mismatch(
+            mismatch,
+            evidence_refs=("turn-1", "turn-2"),
+        )
 
         self.assertEqual(candidate.status, "pending")
         self.assertTrue(candidate.is_pending)
         self.assertIsNone(candidate.assessment)
+        self.assertEqual(candidate.evidence_refs, ("turn-1", "turn-2"))
 
     def test_magnitude_alone_never_promotes_pending_to_unresolved(self):
         mismatch = MismatchObservation(values={"route": 999.0})
@@ -40,18 +44,24 @@ class ResolutionPolicyTests(unittest.TestCase):
 
     def test_pending_requires_explicit_provenance_to_become_unresolved(self):
         mismatch = MismatchObservation(values={"route": 1.0})
-        candidate = classify_mismatch(mismatch)
+        candidate = classify_mismatch(
+            mismatch,
+            evidence_refs=("turn-1", "turn-2"),
+        )
 
         assessment = promote_pending_to_unresolved(
             candidate,
             reason="the mismatch persisted after an explicit finite re-evaluation",
             assessor="test-harness",
-            evidence_refs=("turn-1", "turn-2", "review-1"),
+            evidence_refs=("review-1", "turn-2"),
         )
 
         self.assertTrue(assessment.unresolved)
         self.assertEqual(assessment.assessor, "test-harness")
-        self.assertIn("review-1", assessment.evidence_refs)
+        self.assertEqual(
+            assessment.evidence_refs,
+            ("turn-1", "turn-2", "review-1"),
+        )
 
     def test_resolved_candidate_cannot_be_promoted_to_unresolved(self):
         candidate = classify_mismatch(MismatchObservation(values={"route": 0.0}))
