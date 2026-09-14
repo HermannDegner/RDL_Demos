@@ -1,11 +1,14 @@
 """Tests for the opt-in v2.3 shadow CLI entrypoint."""
 
 import io
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 
 from cli_v23 import install_shadow_session
 from migration_session_v23 import CanonicalMigrationSession
+from persistence_v23 import load_session
 
 
 class _Node:
@@ -183,6 +186,57 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertEqual(len(session.reviews), 0)
         self.assertEqual(session.controller.authority.h_magnitude, 0.0)
         self.assertIn("review理由が必要", output.getvalue())
+
+    def test_state_path_persists_and_restart_continues_monotonic_turn_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "v23_shadow.json")
+            graph = _Graph()
+            first_legacy = _LegacyMain()
+            first_session = install_shadow_session(
+                first_legacy,
+                session=CanonicalMigrationSession(theta=0.5),
+                state_path=path,
+            )
+            first_legacy.respond("alpha", graph, None, None, None, [], None)
+            first_legacy.respond("alp", graph, None, None, None, [], None)
+
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(first_session.shadow.last_assigned_index, 2)
+            self.assertEqual(len(load_session(path).pending_records), 1)
+
+            second_legacy = _LegacyMain()
+            restored = install_shadow_session(second_legacy, state_path=path)
+            self.assertEqual(restored.shadow.index_offset, 2)
+            self.assertEqual(len(restored.pending_records), 1)
+
+            second_legacy.respond("alpha", graph, None, None, None, [], None)
+            self.assertEqual(restored.shadow.available_turn_indices, (3,))
+            self.assertEqual(len(restored.assessments), 1)
+
+            second_legacy.respond("alp", graph, None, None, None, [], None)
+            self.assertEqual(restored.shadow.available_turn_indices, (3, 4))
+            self.assertEqual((restored.assessments[-1].earlier_index, restored.assessments[-1].later_index), (3, 4))
+
+    def test_review_command_persists_canonical_H_and_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "v23_shadow.json")
+            graph = _Graph()
+            legacy = _LegacyMain()
+            install_shadow_session(
+                legacy,
+                session=CanonicalMigrationSession(theta=0.5),
+                state_path=path,
+            )
+            legacy.respond("alpha", graph, None, None, None, [], None)
+            legacy.respond("alp", graph, None, None, None, [], None)
+
+            legacy.handle_command("/v23 unresolved reviewed mismatch remains unresolved")
+            restored = load_session(path)
+
+            self.assertEqual(len(restored.reviews), 1)
+            self.assertEqual(restored.reviews[0].disposition, "unresolved")
+            self.assertGreater(restored.controller.authority.h_magnitude, 0.0)
+            self.assertTrue(restored.controller.authority.should_reconstruct)
 
     def test_non_v23_command_is_delegated_unchanged(self):
         legacy = _LegacyMain()
