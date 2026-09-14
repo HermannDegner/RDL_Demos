@@ -9,6 +9,7 @@ import {
   acquireInteractionSection,
   compareInterpretations,
   interpretSection,
+  legacyLocalDynamicsView,
 } from '../demos/relational-ecology-lab/v23_state.mjs';
 
 function context() {
@@ -126,4 +127,27 @@ test('coverage remains separate from H and Core xi', () => {
   assert.equal(state.magnitude, 0);
   assert.equal(state.theta, 0.2);
   assert.equal('xi' in coverage, false);
+});
+
+test('legacy Living Field fields are exposed only through demo-local names', () => {
+  const agent = {
+    H: { resource: 0.3, danger: 0.8, motion: 0.1 },
+    xi: 0.42,
+    thetaEffective: 0.73,
+  };
+
+  const view = legacyLocalDynamicsView(agent);
+  assert.deepEqual(view.localLoad, agent.H);
+  assert.equal(view.adaptationPressure, 0.42);
+  assert.equal(view.localLeapThreshold, 0.73);
+  assert.deepEqual(view.sourceFields, {
+    localLoad: 'H',
+    adaptationPressure: 'xi',
+    localLeapThreshold: 'thetaEffective',
+  });
+  assert.equal('xi' in view, false);
+  assert.equal('H' in view, false);
+
+  agent.H.resource = 0.9;
+  assert.equal(view.localLoad.resource, 0.3);
 });
