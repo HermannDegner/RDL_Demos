@@ -124,6 +124,22 @@ class UnresolvedMismatchState:
             next_values[key] = retained + increment
         self.values = next_values
 
+    def restore_snapshot(self, snapshot: Mapping[str, float]) -> None:
+        """Restore persisted unresolved-H coordinates after validation.
+
+        A restart restores already-classified state; it does not replay or invent
+        E observations.  Values must therefore be finite, non-negative numeric
+        magnitudes.  The fixed theta/decay configuration is not changed here.
+        """
+
+        restored: dict[str, float] = {}
+        for key, raw_value in dict(snapshot).items():
+            value = float(raw_value)
+            if value < 0 or value != value or value in (float("inf"), float("-inf")):
+                raise ValueError("persisted H snapshot values must be finite and non-negative")
+            restored[str(key)] = value
+        self.values = restored
+
     @property
     def magnitude(self) -> float:
         return max(self.values.values(), default=0.0)
