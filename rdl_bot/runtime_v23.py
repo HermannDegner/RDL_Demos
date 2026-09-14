@@ -193,13 +193,19 @@ def respond_with_shadow(
     h: Any,
     llm: Any,
     sfo_profile: Any,
-    xi_pool: list[str],
+    unresolved_queue: list[str],
     llm_trust: Any,
     *,
     shadow: Optional[V23ConversationShadow] = None,
     legacy_respond: Optional[Callable[..., tuple[str, str]]] = None,
 ) -> tuple[str, str]:
-    """Call the legacy response path unchanged while recording canonical sections."""
+    """Call the legacy response path unchanged while recording canonical sections.
+
+    ``unresolved_queue`` is the v2.3 migration name for the list historically
+    passed to ``main.respond`` as ``xi_pool``.  It is still passed positionally to
+    the legacy function, so behaviour is unchanged; the new adapter API no
+    longer names the deferred-input queue after Core xi.
+    """
 
     if shadow is None:
         shadow = V23ConversationShadow()
@@ -217,7 +223,7 @@ def respond_with_shadow(
         h,
         llm,
         sfo_profile,
-        xi_pool,
+        unresolved_queue,
         llm_trust,
     )
     shadow.capture_response(turn, response_text, node_id)
