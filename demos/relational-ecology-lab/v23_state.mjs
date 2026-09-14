@@ -16,6 +16,7 @@
 //     -> same pre-update M_B
 //     -> F'
 //     -> E = Delta(F, F')
+//     -> explicit assessment
 //     -> unresolved component only
 //     -> H
 //
@@ -74,6 +75,71 @@ export class MismatchObservation {
   }
 }
 
+export const MISMATCH_ASSESSMENT_STATUSES = Object.freeze([
+  "zero-difference",
+  "pending-assessment",
+  "ordinary-temporal-change",
+  "boundary-or-coverage-change",
+  "resolved-difference",
+  "unresolved-mismatch",
+]);
+
+const MISMATCH_ASSESSMENT_STATUS_SET = new Set(MISMATCH_ASSESSMENT_STATUSES);
+const EXPLICIT_ASSESSMENT_STATUSES = new Set([
+  "ordinary-temporal-change",
+  "boundary-or-coverage-change",
+  "resolved-difference",
+  "unresolved-mismatch",
+]);
+
+export class MismatchAssessment {
+  constructor({ status, basis = null, provenance = null }) {
+    if (!MISMATCH_ASSESSMENT_STATUS_SET.has(status)) {
+      throw new Error(`unknown mismatch assessment status: ${status}`);
+    }
+    if (EXPLICIT_ASSESSMENT_STATUSES.has(status) && !String(basis ?? "").trim()) {
+      throw new Error(`${status} requires a non-empty basis`);
+    }
+    this.status = status;
+    this.basis = basis == null ? null : String(basis);
+    this.provenance = provenance ? frozenObject(provenance) : null;
+    Object.freeze(this);
+  }
+
+  get eligibleForH() {
+    return this.status === "unresolved-mismatch";
+  }
+
+  get pending() {
+    return this.status === "pending-assessment";
+  }
+}
+
+export function assessMismatch(
+  mismatch,
+  { classification = null, basis = null, provenance = null } = {},
+) {
+  if (!(mismatch instanceof MismatchObservation)) {
+    throw new Error("mismatch must be a MismatchObservation");
+  }
+  if (mismatch.magnitude === 0) {
+    if (classification && classification !== "zero-difference") {
+      throw new Error("zero mismatch cannot be classified as non-zero evidence");
+    }
+    return new MismatchAssessment({
+      status: "zero-difference",
+      basis: basis ?? "F and F' are equal under the same finite evaluator",
+      provenance,
+    });
+  }
+
+  const status = classification ?? "pending-assessment";
+  if (status === "zero-difference") {
+    throw new Error("non-zero mismatch cannot be classified as zero-difference");
+  }
+  return new MismatchAssessment({ status, basis, provenance });
+}
+
 export class UnresolvedMismatchState {
   constructor({ theta = 1, decay = 1 } = {}) {
     if (theta < 0) throw new Error("theta must be non-negative");
@@ -83,15 +149,29 @@ export class UnresolvedMismatchState {
     this.values = {};
   }
 
-  observe(mismatch, { unresolved }) {
+  observe(mismatch, { unresolved = null, assessment = null } = {}) {
     if (!(mismatch instanceof MismatchObservation)) {
       throw new Error("mismatch must be a MismatchObservation");
     }
+    let unresolvedFlag = unresolved;
+    if (assessment !== null) {
+      if (!(assessment instanceof MismatchAssessment)) {
+        throw new Error("assessment must be a MismatchAssessment");
+      }
+      if (assessment.pending) {
+        throw new Error("pending mismatch assessment cannot update H");
+      }
+      unresolvedFlag = assessment.eligibleForH;
+    }
+    if (typeof unresolvedFlag !== "boolean") {
+      throw new Error("observe requires unresolved boolean or completed assessment");
+    }
+
     const keys = new Set([...Object.keys(this.values), ...Object.keys(mismatch.values)]);
     const next = {};
     for (const key of keys) {
       const retained = (this.values[key] ?? 0) * this.decay;
-      const increment = unresolved ? Math.abs(mismatch.values[key] ?? 0) : 0;
+      const increment = unresolvedFlag ? Math.abs(mismatch.values[key] ?? 0) : 0;
       next[key] = retained + increment;
     }
     this.values = next;
