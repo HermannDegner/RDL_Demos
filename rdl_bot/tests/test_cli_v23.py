@@ -1,4 +1,4 @@
-"""Tests for the opt-in v2.3 shadow CLI entrypoint."""
+"""Tests for the opt-in v2.3 CLI entrypoint."""
 
 import io
 import os
@@ -12,8 +12,8 @@ from persistence_v23 import load_session
 
 
 class _Node:
-    def __init__(self):
-        self.id = "node-a"
+    def __init__(self, node_id="node-a"):
+        self.id = node_id
         self.inputs = ["alpha"]
         self.relations = []
         self.status = "active"
@@ -27,6 +27,8 @@ class _Graph:
     def __init__(self):
         self.node = _Node()
         self.nodes = {self.node.id: self.node}
+        self.saved = 0
+        self.relation_updates = []
 
     def search(self, text):
         if text == "alpha":
@@ -34,6 +36,33 @@ class _Graph:
         if text == "alp":
             return self.node, "partial", self.node
         return None, "miss", None
+
+    def get_by_id(self, ref):
+        return self.nodes.get(ref)
+
+    def add(self, node):
+        self.nodes[node.id] = node
+
+    def update_relations(self, ref, relations):
+        self.relation_updates.append((ref, tuple(relations)))
+
+    def save(self):
+        self.saved += 1
+
+
+class _LLM:
+    def __init__(self, *, mode="on", available=True, revised=None):
+        self.mode = mode
+        self._available = available
+        self.revised = revised
+        self.calls = []
+
+    def available(self):
+        return self._available
+
+    def ask_for_node_revision(self, node, user_input=None):
+        self.calls.append((node.id, user_input))
+        return self.revised
 
 
 class _LegacyMain:
@@ -101,7 +130,6 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertEqual(legacy.command_calls, [])
         self.assertEqual(session.controller.authority.h_magnitude, before_h)
         self.assertEqual(len(session.pending_records), before_pending)
-        self.assertIn("read-only", output.getvalue())
         self.assertIn("pending=1", output.getvalue())
 
     def test_explicit_resolve_review_closes_pending_without_H(self):
@@ -162,6 +190,59 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertIn("status=target-proposed", output.getvalue())
         self.assertIn("target=node-a", output.getvalue())
         self.assertIn("dry-run only", output.getvalue())
+
+    def test_execute_mutates_only_after_explicit_unresolved_review(self):
+        legacy, session, graph = installed_pending_session(theta=0.5)
+        llm = _LLM(revised=_Node("node-b"))
+        legacy.handle_command(
+            "/v23 unresolved reviewed canonical mismatch",
+            llm,
+            graph,
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            handled = legacy.handle_command("/v23 execute", llm, graph)
+
+        self.assertTrue(handled)
+        self.assertEqual(legacy.command_calls, [])
+        self.assertIn("node-b", graph.nodes)
+        self.assertEqual(graph.nodes["node-a"].status, "deprecated")
+        self.assertIn("node-a", graph.nodes["node-b"].relations)
+        self.assertEqual(len(session.executions), 1)
+        self.assertTrue(session.executions[0].mutated)
+        self.assertIn("mutation=mutated-with-llm-revision", output.getvalue())
+
+    def test_successful_execute_is_one_shot_for_same_review(self):
+        legacy, session, graph = installed_pending_session(theta=0.5)
+        llm = _LLM(revised=_Node("node-b"))
+        legacy.handle_command("/v23 unresolved reviewed mismatch", llm, graph)
+        legacy.handle_command("/v23 execute", llm, graph)
+        calls_after_first = list(llm.calls)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            legacy.handle_command("/v23 execute", llm, graph)
+
+        self.assertEqual(llm.calls, calls_after_first)
+        self.assertEqual(len(session.executions), 1)
+        self.assertIn("already-executed-canonical-review", output.getvalue())
+
+    def test_llm_off_execute_is_non_mutating_and_retryable(self):
+        legacy, session, graph = installed_pending_session(theta=0.5)
+        llm = _LLM(mode="off", revised=_Node("node-b"))
+        legacy.handle_command("/v23 unresolved reviewed mismatch", llm, graph)
+        legacy.handle_command("/v23 execute", llm, graph)
+
+        self.assertEqual(graph.nodes["node-a"].status, "active")
+        self.assertNotIn("node-b", graph.nodes)
+        self.assertEqual(len(session.executions), 1)
+        self.assertFalse(session.executions[0].mutated)
+
+        llm.mode = "on"
+        legacy.handle_command("/v23 execute", llm, graph)
+        self.assertIn("node-b", graph.nodes)
+        self.assertTrue(session.executions[-1].mutated)
 
     def test_plan_without_unresolved_review_does_not_create_one(self):
         legacy, session, _ = installed_pending_session(theta=0.5)
@@ -237,6 +318,36 @@ class V23ShadowCliTests(unittest.TestCase):
             self.assertEqual(restored.reviews[0].disposition, "unresolved")
             self.assertGreater(restored.controller.authority.h_magnitude, 0.0)
             self.assertTrue(restored.controller.authority.should_reconstruct)
+
+    def test_successful_execution_audit_persists_and_blocks_restart_reexecution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "v23_shadow.json")
+            graph = _Graph()
+            legacy = _LegacyMain()
+            session = install_shadow_session(
+                legacy,
+                session=CanonicalMigrationSession(theta=0.5),
+                state_path=path,
+            )
+            llm = _LLM(revised=_Node("node-b"))
+            legacy.respond("alpha", graph, None, None, None, [], None)
+            legacy.respond("alp", graph, None, None, None, [], None)
+            legacy.handle_command("/v23 unresolved reviewed mismatch", llm, graph)
+            legacy.handle_command("/v23 execute", llm, graph)
+
+            self.assertTrue(session.executions[-1].mutated)
+            restored = load_session(path)
+            self.assertEqual(len(restored.executions), 1)
+            self.assertTrue(restored.executions[0].mutated)
+
+            second_legacy = _LegacyMain()
+            restored = install_shadow_session(second_legacy, state_path=path)
+            retry_llm = _LLM(revised=_Node("node-c"))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                second_legacy.handle_command("/v23 execute", retry_llm, graph)
+            self.assertEqual(retry_llm.calls, [])
+            self.assertIn("already-executed-canonical-review", output.getvalue())
 
     def test_non_v23_command_is_delegated_unchanged(self):
         legacy = _LegacyMain()
