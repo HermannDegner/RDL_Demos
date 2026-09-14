@@ -3,8 +3,21 @@ function average(values) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function maxValue(record = {}) {
-  return Math.max(0, ...Object.values(record).map((value) => Math.abs(value)));
+function l2Norm(record = {}) {
+  return Math.sqrt(
+    Object.values(record ?? {}).reduce((sum, value) => {
+      const numeric = Number(value) || 0;
+      return sum + numeric * numeric;
+    }, 0),
+  );
+}
+
+function scalarH(snapshot = {}) {
+  if (typeof snapshot.H === "number") return Math.abs(snapshot.H);
+  if (snapshot.HVector && typeof snapshot.HVector === "object") return l2Norm(snapshot.HVector);
+  // Compatibility for snapshots produced before the Core v2.3 H-scalar cutover.
+  if (snapshot.H && typeof snapshot.H === "object") return l2Norm(snapshot.H);
+  return 0;
 }
 
 export function summarizeSnapshots(snapshots, {
@@ -21,6 +34,7 @@ export function summarizeSnapshots(snapshots, {
       hSilenceRate: 0,
       reliabilityCollapseRate: 0,
       averageAdaptationPressure: 0,
+      averageH: 0,
       averageMaxH: 0,
       finalLeaps: 0,
     };
@@ -33,10 +47,11 @@ export function summarizeSnapshots(snapshots, {
   const pressureSaturated = snapshots.filter((snapshot) => (
     (snapshot.adaptationPressure ?? 0) >= pressureSaturationLine
   )).length;
-  const hSilent = snapshots.filter((snapshot) => maxValue(snapshot.H) <= hSilenceThreshold).length;
+  const hSilent = snapshots.filter((snapshot) => scalarH(snapshot) <= hSilenceThreshold).length;
   const reliabilityCollapse = snapshots.filter((snapshot) => (
     Object.values(snapshot.reliability ?? {}).some((value) => value <= reliabilityCollapseThreshold)
   )).length;
+  const averageScalarH = average(snapshots.map((snapshot) => scalarH(snapshot)));
 
   return {
     ticks: snapshots.length,
@@ -47,7 +62,9 @@ export function summarizeSnapshots(snapshots, {
     averageAdaptationPressure: average(
       snapshots.map((snapshot) => snapshot.adaptationPressure ?? 0),
     ),
-    averageMaxH: average(snapshots.map((snapshot) => maxValue(snapshot.H))),
+    averageH: averageScalarH,
+    // Compatibility alias for callers of the pre-scalar metric name.
+    averageMaxH: averageScalarH,
     finalLeaps,
   };
 }
