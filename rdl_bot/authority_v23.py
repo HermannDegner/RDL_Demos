@@ -20,7 +20,7 @@ cannot alter this authority's threshold by construction.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Mapping, Optional
 
 try:  # package-style imports
     from .resolution_v23 import ResolutionAssessment
@@ -81,6 +81,17 @@ class CanonicalLeapAuthority:
 
     def h_snapshot(self) -> dict[str, float]:
         return self._h.snapshot()
+
+    def restore_h_snapshot(self, snapshot: Mapping[str, float]) -> None:
+        """Restore a persisted canonical H snapshot without replaying fake E events.
+
+        Restart durability should preserve already-classified unresolved state,
+        not manufacture a new mismatch sequence.  This method therefore restores
+        the finite H coordinates directly after validating them through the
+        underlying state object.
+        """
+
+        self._h.restore_snapshot(snapshot)
 
     @staticmethod
     def _require_assessment(assessment: ResolutionAssessment) -> ResolutionAssessment:
