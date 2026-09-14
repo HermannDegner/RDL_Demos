@@ -109,11 +109,33 @@ class ParallelAuthorityTests(unittest.TestCase):
 
         self.assertEqual(legacy.merged_h("node-known"), before)
 
-    def test_model_change_is_recorded_without_false_canonical_action(self):
+    def test_live_model_change_is_compared_under_earlier_snapshot(self):
         graph = _Graph()
         shadow = V23ConversationShadow()
         shadow.capture_input("known", graph)
+        first_ref = shadow.turns[0].model_ref
         graph.node.confidence = 0.3
+        shadow.capture_input("unknown", graph)
+        second_ref = shadow.turns[1].model_ref
+        observer = CanonicalParallelObserver(CanonicalLeapAuthority(theta=0.5))
+
+        record = observer.observe_pair(
+            shadow=shadow,
+            legacy_state=HState(theta=2.0),
+            earlier_index=1,
+            later_index=2,
+            assessment=unresolved(),
+        )
+
+        self.assertNotEqual(first_ref, second_ref)
+        self.assertEqual(record.canonical_status, "observed-unresolved")
+        self.assertTrue(record.canonical_should_reconstruct)
+
+    def test_boundary_change_is_recorded_without_false_canonical_action(self):
+        graph = _Graph()
+        shadow = V23ConversationShadow(boundary_id="B:one")
+        shadow.capture_input("known", graph)
+        shadow.boundary_id = "B:two"
         shadow.capture_input("unknown", graph)
         observer = CanonicalParallelObserver(CanonicalLeapAuthority(theta=0.5))
 
@@ -125,7 +147,7 @@ class ParallelAuthorityTests(unittest.TestCase):
             assessment=unresolved(),
         )
 
-        self.assertEqual(record.canonical_status, "model-changed-no-E")
+        self.assertEqual(record.canonical_status, "boundary-changed-no-E")
         self.assertFalse(record.canonical_should_reconstruct)
 
     def test_records_accumulate_for_external_comparison(self):
