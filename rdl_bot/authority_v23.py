@@ -4,12 +4,13 @@ This module is intentionally non-authoritative for the live CLI until the
 migration cutover is explicitly performed.  It provides the Step 6 candidate
 path:
 
-    same-pre-update F / F'
-        -> E = Delta(F, F')
-        -> provenance-bearing ResolutionAssessment
-        -> canonical H candidate
-        -> fixed theta
-        -> reconstruction eligibility
+    RIB_B(t)     -> F  = interp(M_B(t), RIB_B(t))
+    RIB_B(t+Δ)   -> F' = interp(M_B(t), RIB_B(t+Δ))
+                     -> E = Delta(F, F')
+                     -> provenance-bearing ResolutionAssessment
+                     -> canonical H candidate
+                     -> fixed theta
+                     -> reconstruction eligibility
 
 No API in this module accepts legacy miss/deny/silence counters, unresolved
 input queue size, uncertainty, or a Core-xi scalar.  Those signals therefore
@@ -51,8 +52,11 @@ class CanonicalLeapAuthority:
     """Non-authoritative candidate for fixed-theta reconstruction eligibility.
 
     ``theta`` is fixed for the lifetime of this object.  The authority does not
-    expose queue pressure or legacy feedback inputs.  Model-ref drift is treated
-    as non-comparable: it produces no canonical E and therefore no H update.
+    expose queue pressure or legacy feedback inputs.
+
+    For a temporal comparison, F and F' are both formed by the evaluator frozen
+    at the earlier turn.  Therefore mutation of the live graph between turns is
+    not itself a reason to drop E.  A changed comparison boundary B is.
 
     An explicit :class:`ResolutionAssessment` is mandatory.  A raw bool is not a
     sufficient application boundary because it could silently recreate old
@@ -111,20 +115,18 @@ class CanonicalLeapAuthority:
         *,
         assessment: ResolutionAssessment,
     ) -> AuthorityObservation:
-        """Compare two shadow input states and update H only if comparison is valid.
+        """Form canonical E using the earlier frozen evaluator and observe it.
 
-        ``V23ConversationShadow.compare_inputs`` returns ``None`` when the two
-        observations do not share the same frozen pre-response model_ref.  Such
-        a pair is not converted into an error surrogate and does not update H.
-        The supplied assessment is retained as provenance but cannot manufacture
-        an E when the comparison contract is not satisfied.
+        ``replay_later_under_earlier_model`` forms F' from the later acquired
+        section using the evaluator frozen at ``earlier_index``.  It returns
+        ``None`` only when the finite comparison boundary itself changed.
         """
 
         assessment = self._require_assessment(assessment)
-        mismatch = shadow.compare_inputs(earlier_index, later_index)
+        mismatch = shadow.replay_later_under_earlier_model(earlier_index, later_index)
         if mismatch is None:
             return AuthorityObservation(
-                status="model-changed-no-E",
+                status="boundary-changed-no-E",
                 mismatch=None,
                 assessment=assessment,
                 h_magnitude=self.h_magnitude,
