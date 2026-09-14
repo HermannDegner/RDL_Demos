@@ -1,6 +1,6 @@
 # rdl_bot — Core v2.3 migration boundary
 
-Status: **migration in progress / reviewed durable shadow path operational**  
+Status: **migration in progress / explicit canonical execution operational**  
 Normative semantic reference: `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3.
 
 `rdl_bot` は旧RDL世代から継続する会話実験であり、`EFP`、`xi_pool`、`H_pre/H_post` 等のpre-v2.3名がまだ残る。これらを現行Core記号と同一視しない。
@@ -84,7 +84,7 @@ Core ξ scalar
 
 ## 4. Reconstruction path
 
-canonical再編資格とtarget選択を分離する。
+canonical再編資格、target選択、実mutationを分離する。
 
 ```text
 canonical H >= fixed θ
@@ -101,14 +101,20 @@ canonical turn evidenceをearlier frozen evaluatorで再評価
       ↓ unique only
 CanonicalReconstructionExecutor
       ↓
-injected mutation callback
+canonical mutation adapter
+      ↓
+LLM revision generation
+      ├─ unavailable / failed -> no mutation
+      └─ success
+           old node -> deprecated
+           new node -> add + relation
 ```
 
 plannerはlegacy Hのhot-nodeを参照しない。executorはtarget選択を行わず、ambiguous / missing / invalid planではmutation callbackを呼ばない。
 
-`pipeline_v23.py` には explicit review後のend-to-end candidate pathがあるが、default CLIのgraph mutation authorityにはまだ接続していない。
+`mutation_v23.py` は既にcanonical targetだけを受けるLLM revision adapterを持つ。legacy H、hot-node、queue pressureは入力に取らない。
 
-## 5. Opt-in reviewed durable shadow CLI
+## 5. Opt-in reviewed durable canonical CLI
 
 default CLI:
 
@@ -118,16 +124,16 @@ py main.py
 
 これは現在もlegacy graph-mutation authorityを使う。
 
-Core v2.3 shadow CLI:
+Core v2.3 reviewed CLI:
 
 ```bash
 py cli_v23.py
 py cli_v23.py --seed
 ```
 
-`cli_v23.py` は既存 `main.main()` をそのまま利用し、`respond` と `/v23` 系commandだけをwrapする。user-visible response、legacy feedback、LLM trust、legacy mutation authorityは維持される。
+`cli_v23.py` は既存 `main.main()` を利用し、canonical観測・review・plan・explicit executeを追加する。user-visible response、legacy feedback、LLM trust、default legacy action authorityは維持される。
 
-canonical shadow stateは `data/v23_shadow_state.json` へJSON保存する。
+canonical stateは `data/v23_shadow_state.json` へJSON保存する。
 
 保存対象:
 
@@ -136,6 +142,7 @@ fixed θ / decay
 canonical H snapshot
 assessment / pending records
 explicit review audit
+explicit execution audit
 last assigned turn id
 ```
 
@@ -158,7 +165,7 @@ turn N+2
    -> compare N+1 vs N+2 under frozen M_B(N+1)
 ```
 
-旧pending/reviewはaudit・review用途として保持するが、そのtarget planningに必要な旧frozen evaluatorが無ければ `target-evidence-unavailable` で止まる。
+旧pending/reviewはaudit用途として保持する。target planningに必要な旧frozen evaluatorが無ければ `target-evidence-unavailable` で止まる。
 
 ### `/v23`
 
@@ -170,13 +177,12 @@ last turn id
 assessment count
 pending count
 review count
+execution count
 canonical H
 fixed θ
 reconstruction eligibility
-latest pending / review
+latest pending / review / execution
 ```
-
-状態を変更しない。
 
 ### `/v23 resolve <reason>`
 
@@ -216,7 +222,35 @@ H >= θ
   -> target-proposed / target-review-required / target-evidence-unavailable
 ```
 
-**dry-run only**。executorもmutation callbackも呼ばない。
+**dry-run only**。
+
+### `/v23 execute`
+
+最新の**既にexplicit review済み** unresolved caseに対してのみ実行可能。
+
+```text
+review済み canonical H >= θ
+        ↓
+unique canonical target
+        ↓
+/v23 execute
+        ↓
+CanonicalReconstructionExecutor
+        ↓
+mutation_v23 adapter
+```
+
+安全境界:
+
+```text
+target missing          -> no mutation
+LLM off / unavailable   -> no mutation
+revision API unavailable-> no mutation
+revision generation fail-> no mutation
+success                 -> old deprecated / new added
+```
+
+成功mutationは同じreviewについてone-shotで、execution auditを永続化するため再起動後も二重実行しない。無変更試行は後で明示的に再試行できる。
 
 ## 6. Current fixed boundaries
 
@@ -235,9 +269,11 @@ queue length != canonical θ input
 bare bool != sufficient unresolved classification
 reconstruction eligibility != target selection
 target selection != legacy hot-node selection
-shadow review/plan != graph mutation
+review / plan != graph mutation
+execute requires explicit reviewed canonical target
 restart != permission to recreate old frozen evaluator
 cross-restart E is not formed
+successful execution is one-shot per reviewed pair
 ```
 
 ## 7. Migration order
@@ -247,8 +283,8 @@ cross-restart E is not formed
 3. **PARTIAL** — `xi_pool` 実役割を `UnresolvedInputQueue` として分離。`main.py`内部名とCLI表示はcompatibilityとして残存
 4. **DONE** — unresolved-input queue length -> theta のlive結線を切断
 5. **DONE** — legacy feedback stateとcanonical Hを型・更新経路で分離
-6. **PARTIAL / DURABLE SHADOW-CUTOVER READY** — canonical authority、resolution policy、controller、gate、target planner、executor、pipeline、migration session、opt-in `cli_v23.py`、explicit resolved/unresolved review、dry-run target plan、restart-safe JSON persistenceまで実装。**graph mutation authority cutoverのみ未実施**
-7. **AFTER CUTOVER** — 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
+6. **PARTIAL / EXPLICIT CANONICAL EXECUTION OPERATIONAL** — canonical authority、resolution policy、controller、gate、target planner、executor、mutation adapter、pipeline、durable migration session、opt-in `cli_v23.py`、explicit review、dry-run plan、one-shot `/v23 execute` まで実装。**default `main.py` のaction authority cutoverのみ未実施**
+7. **AFTER DEFAULT CUTOVER** — 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
 ## 8. Test boundary
 
@@ -258,7 +294,7 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 
 固定している主な契約:
 
-- legacy responseをshadow wrapperが変更しない
+- legacy responseをv2.3 wrapperが変更しない
 - frozen evaluatorはlive mutationを追わない
 - later `RIB_B` をearlier frozen evaluatorで解釈する
 - B変更時はEを作らない
@@ -273,9 +309,12 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 - legacy feedback / queue diagnosticはcanonical authorityを変えない
 - target plannerはlegacy hot-nodeを参照しない
 - ambiguous / missing targetはexecutorへ進まない
-- shadow CLI `/v23` はread-only
-- shadow CLI reviewはgraphを変更しない
+- `/v23` はread-only
 - `/v23 plan` はdry-runのみ
+- `/v23 execute` はreview済みunique canonical targetだけをmutationへ渡す
+- LLM unavailable / revision失敗ではgraphを変更しない
+- successful executionは同reviewでone-shot
+- execution auditはrestart後も二重実行を防ぐ
 - canonical H / pending / review auditはrestart後も同値復元される
 - turn idはrestart後も単調増加する
 - restart直後はcross-restart Eを作らない
