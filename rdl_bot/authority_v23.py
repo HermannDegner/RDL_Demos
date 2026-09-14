@@ -6,7 +6,7 @@ path:
 
     same-pre-update F / F'
         -> E = Delta(F, F')
-        -> explicit unresolved classification
+        -> provenance-bearing ResolutionAssessment
         -> canonical H candidate
         -> fixed theta
         -> reconstruction eligibility
@@ -22,9 +22,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 try:  # package-style imports
+    from .resolution_v23 import ResolutionAssessment
     from .runtime_v23 import V23ConversationShadow
     from .v23_state import MismatchObservation, UnresolvedMismatchState
 except ImportError:  # historical ``PYTHONPATH=rdl_bot:.`` execution
+    from resolution_v23 import ResolutionAssessment  # type: ignore
     from runtime_v23 import V23ConversationShadow  # type: ignore
     from v23_state import MismatchObservation, UnresolvedMismatchState  # type: ignore
 
@@ -35,10 +37,14 @@ class AuthorityObservation:
 
     status: str
     mismatch: Optional[MismatchObservation]
-    unresolved: bool
+    assessment: ResolutionAssessment
     h_magnitude: float
     theta: float
     should_reconstruct: bool
+
+    @property
+    def unresolved(self) -> bool:
+        return self.assessment.unresolved
 
 
 class CanonicalLeapAuthority:
@@ -47,6 +53,10 @@ class CanonicalLeapAuthority:
     ``theta`` is fixed for the lifetime of this object.  The authority does not
     expose queue pressure or legacy feedback inputs.  Model-ref drift is treated
     as non-comparable: it produces no canonical E and therefore no H update.
+
+    An explicit :class:`ResolutionAssessment` is mandatory.  A raw bool is not a
+    sufficient application boundary because it could silently recreate old
+    ``deny -> H`` style shortcuts.
     """
 
     def __init__(self, *, theta: float = 2.0, decay: float = 1.0) -> None:
@@ -68,19 +78,26 @@ class CanonicalLeapAuthority:
     def h_snapshot(self) -> dict[str, float]:
         return self._h.snapshot()
 
+    @staticmethod
+    def _require_assessment(assessment: ResolutionAssessment) -> ResolutionAssessment:
+        if not isinstance(assessment, ResolutionAssessment):
+            raise TypeError("assessment must be a ResolutionAssessment")
+        return assessment
+
     def observe_mismatch(
         self,
         mismatch: MismatchObservation,
         *,
-        unresolved: bool,
+        assessment: ResolutionAssessment,
     ) -> AuthorityObservation:
-        """Observe canonical E only after an explicit unresolved classification."""
+        """Observe canonical E only through an explicit resolution assessment."""
 
-        self._h.observe(mismatch, unresolved=unresolved)
+        assessment = self._require_assessment(assessment)
+        self._h.observe(mismatch, unresolved=assessment.unresolved)
         return AuthorityObservation(
-            status="observed-unresolved" if unresolved else "observed-resolved",
+            status="observed-unresolved" if assessment.unresolved else "observed-resolved",
             mismatch=mismatch,
-            unresolved=bool(unresolved),
+            assessment=assessment,
             h_magnitude=self.h_magnitude,
             theta=self.theta,
             should_reconstruct=self.should_reconstruct,
@@ -92,23 +109,26 @@ class CanonicalLeapAuthority:
         earlier_index: int,
         later_index: int,
         *,
-        unresolved: bool,
+        assessment: ResolutionAssessment,
     ) -> AuthorityObservation:
         """Compare two shadow input states and update H only if comparison is valid.
 
         ``V23ConversationShadow.compare_inputs`` returns ``None`` when the two
         observations do not share the same frozen pre-response model_ref.  Such
         a pair is not converted into an error surrogate and does not update H.
+        The supplied assessment is retained as provenance but cannot manufacture
+        an E when the comparison contract is not satisfied.
         """
 
+        assessment = self._require_assessment(assessment)
         mismatch = shadow.compare_inputs(earlier_index, later_index)
         if mismatch is None:
             return AuthorityObservation(
                 status="model-changed-no-E",
                 mismatch=None,
-                unresolved=bool(unresolved),
+                assessment=assessment,
                 h_magnitude=self.h_magnitude,
                 theta=self.theta,
                 should_reconstruct=self.should_reconstruct,
             )
-        return self.observe_mismatch(mismatch, unresolved=unresolved)
+        return self.observe_mismatch(mismatch, assessment=assessment)
