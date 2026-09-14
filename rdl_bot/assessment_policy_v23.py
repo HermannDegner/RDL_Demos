@@ -25,12 +25,24 @@ except ImportError:  # historical ``PYTHONPATH=rdl_bot:.`` execution
     from v23_state import MismatchObservation  # type: ignore
 
 
+def _unique_refs(values: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        ref = str(value)
+        if ref not in seen:
+            seen.add(ref)
+            ordered.append(ref)
+    return tuple(ordered)
+
+
 @dataclass(frozen=True)
 class ResolutionCandidate:
     """Runtime classification result before canonical H is allowed to update."""
 
     status: str
     mismatch: MismatchObservation
+    evidence_refs: tuple[str, ...] = ()
     assessment: Optional[ResolutionAssessment] = None
 
     def __post_init__(self) -> None:
@@ -40,6 +52,7 @@ class ResolutionCandidate:
             raise ValueError("resolved candidate requires an assessment")
         if self.status == "pending" and self.assessment is not None:
             raise ValueError("pending candidate must not contain an assessment")
+        object.__setattr__(self, "evidence_refs", _unique_refs(self.evidence_refs))
 
     @property
     def is_pending(self) -> bool:
@@ -59,7 +72,7 @@ def classify_mismatch(
     not evidence that the mismatch is unresolved.
     """
 
-    refs = tuple(str(ref) for ref in evidence_refs)
+    refs = _unique_refs(evidence_refs)
     if mismatch.magnitude == 0.0:
         assessment = ResolutionAssessment.resolved(
             reason="canonical mismatch magnitude is zero under the comparison contract",
@@ -69,9 +82,14 @@ def classify_mismatch(
         return ResolutionCandidate(
             status="resolved",
             mismatch=mismatch,
+            evidence_refs=refs,
             assessment=assessment,
         )
-    return ResolutionCandidate(status="pending", mismatch=mismatch)
+    return ResolutionCandidate(
+        status="pending",
+        mismatch=mismatch,
+        evidence_refs=refs,
+    )
 
 
 def promote_pending_to_unresolved(
@@ -85,12 +103,13 @@ def promote_pending_to_unresolved(
 
     The caller must provide its own reason and assessor.  No legacy feedback
     field is accepted here, and this function cannot promote an already-resolved
-    zero mismatch.
+    zero mismatch.  The original comparison provenance is retained and merged
+    with any additional review evidence.
     """
 
     if not candidate.is_pending:
         raise ValueError("only a pending non-zero mismatch can be promoted")
-    refs = tuple(str(ref) for ref in evidence_refs)
+    refs = _unique_refs((*candidate.evidence_refs, *tuple(str(ref) for ref in evidence_refs)))
     return ResolutionAssessment.unresolved_case(
         reason=reason,
         assessor=assessor,
