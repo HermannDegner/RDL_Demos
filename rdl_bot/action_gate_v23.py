@@ -35,6 +35,21 @@ class ReconstructionRequest:
     target_ref: None = None
 
 
+def _mismatch_reasons(observation: AuthorityObservation) -> tuple[str, ...]:
+    """Return explicit reasons, falling back to non-zero mismatch dimensions."""
+
+    mismatch = observation.mismatch
+    if mismatch is None:
+        return ()
+    if mismatch.reasons:
+        return tuple(mismatch.reasons)
+    return tuple(
+        key
+        for key, value in sorted(mismatch.values.items())
+        if abs(float(value)) > 0.0
+    )
+
+
 class CanonicalActionGate:
     """Translate one authority observation into reconstruction eligibility."""
 
@@ -52,7 +67,7 @@ class CanonicalActionGate:
             status="canonical-reconstruction-requested",
             h_magnitude=observation.h_magnitude,
             theta=observation.theta,
-            mismatch_reasons=tuple(observation.mismatch.reasons),
+            mismatch_reasons=_mismatch_reasons(observation),
             assessment_reason=observation.assessment.reason,
             assessment_assessor=observation.assessment.assessor,
             evidence_refs=tuple(observation.assessment.evidence_refs),
