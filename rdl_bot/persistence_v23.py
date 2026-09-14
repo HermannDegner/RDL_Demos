@@ -5,6 +5,7 @@ Persisted:
 - canonical unresolved-H coordinates;
 - assessment/pending records;
 - explicit review audit records;
+- explicit execution audit records;
 - greatest assigned turn id.
 
 Not persisted:
@@ -22,13 +23,13 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 try:  # package-style imports
     from .assessment_policy_v23 import ResolutionCandidate
     from .authority_v23 import AuthorityObservation
     from .canonical_runtime_v23 import RuntimeAssessmentRecord
-    from .migration_session_v23 import CanonicalMigrationSession, SessionReview
+    from .migration_session_v23 import CanonicalMigrationSession, SessionExecution, SessionReview
     from .resolution_v23 import ResolutionAssessment
     from .runtime_v23 import V23ConversationShadow
     from .v23_state import MismatchObservation
@@ -36,7 +37,7 @@ except ImportError:  # historical ``PYTHONPATH=rdl_bot:.`` execution
     from assessment_policy_v23 import ResolutionCandidate  # type: ignore
     from authority_v23 import AuthorityObservation  # type: ignore
     from canonical_runtime_v23 import RuntimeAssessmentRecord  # type: ignore
-    from migration_session_v23 import CanonicalMigrationSession, SessionReview  # type: ignore
+    from migration_session_v23 import CanonicalMigrationSession, SessionExecution, SessionReview  # type: ignore
     from resolution_v23 import ResolutionAssessment  # type: ignore
     from runtime_v23 import V23ConversationShadow  # type: ignore
     from v23_state import MismatchObservation  # type: ignore
@@ -170,6 +171,28 @@ def _review_from_dict(value: Mapping[str, Any]) -> SessionReview:
     )
 
 
+def _execution_to_dict(value: SessionExecution) -> dict[str, Any]:
+    return {
+        "earlier_index": int(value.earlier_index),
+        "later_index": int(value.later_index),
+        "executor_status": value.executor_status,
+        "target_ref": value.target_ref,
+        "mutation_status": value.mutation_status,
+    }
+
+
+def _execution_from_dict(value: Mapping[str, Any]) -> SessionExecution:
+    target_ref = value.get("target_ref")
+    mutation_status = value.get("mutation_status")
+    return SessionExecution(
+        earlier_index=int(value["earlier_index"]),
+        later_index=int(value["later_index"]),
+        executor_status=str(value["executor_status"]),
+        target_ref=str(target_ref) if target_ref is not None else None,
+        mutation_status=str(mutation_status) if mutation_status is not None else None,
+    )
+
+
 def session_to_dict(session: CanonicalMigrationSession) -> dict[str, Any]:
     """Return a JSON-safe durable snapshot without frozen evaluator objects."""
 
@@ -181,6 +204,7 @@ def session_to_dict(session: CanonicalMigrationSession) -> dict[str, Any]:
         "h_snapshot": session.controller.authority.h_snapshot(),
         "assessments": [_record_to_dict(record) for record in session.assessments],
         "reviews": [_review_to_dict(review) for review in session.reviews],
+        "executions": [_execution_to_dict(item) for item in session.executions],
         "restart_policy": "fresh-comparison-window-no-cross-restart-E",
     }
 
@@ -203,9 +227,11 @@ def session_from_dict(payload: Mapping[str, Any]) -> CanonicalMigrationSession:
     )
     records = [_record_from_dict(item) for item in payload.get("assessments", ())]
     reviews = [_review_from_dict(item) for item in payload.get("reviews", ())]
+    executions = [_execution_from_dict(item) for item in payload.get("executions", ())]
     session.assessments = records
     session.controller.records = list(records)
     session.reviews = reviews
+    session.executions = executions
     session.controller.authority.restore_h_snapshot(payload.get("h_snapshot", {}))
     return session
 
