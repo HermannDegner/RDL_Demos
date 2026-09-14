@@ -25,8 +25,10 @@ InteractionSection'
         F'
         ↓
 E = Δ(F, F')
-        ↓ unresolved only
-        H
+        ↓ ResolutionAssessment
+unresolved only
+        ↓
+H
 ```
 
 `runtime_v23.V23ConversationShadow` は応答生成前の有限graph状態をfingerprintし、入力sectionとFを記録する。旧 `main.respond()` はそのまま呼ばれるため、shadow観測はlegacy応答・学習・保存判断を変更しない。
@@ -44,6 +46,7 @@ noise / random jitter != ξ
 all E != H
 runtime unresolved-input queue length does not change theta
 legacy miss / deny / silence do not mutate canonical H
+bare bool is not a sufficient unresolved classification
 model_ref changed -> canonical E NOT FORMED
 ```
 
@@ -64,7 +67,7 @@ miss / partial / exact / deny / rephrase / agree / silence
           legacy leap / correction
 ```
 
-このlegacy feedback/load状態とcanonical Hは**別の状態型**として固定済み。`miss / deny / silence` を発生させても `UnresolvedMismatchState` は変化しない。canonical Hを増やせるのは、same pre-update modelで形成した `F / F'` のcanonical mismatchを明示的に `unresolved=True` として観測した場合だけである。
+このlegacy feedback/load状態とcanonical Hは**別の状態型**として固定済み。`miss / deny / silence` を発生させても `UnresolvedMismatchState` は変化しない。
 
 旧 `xi_pool -> theta` 結線はlive runtimeから切断済み。
 
@@ -80,13 +83,40 @@ unresolved input queue
 
 実役割名として `local_state.UnresolvedInputQueue` を追加済みで、v2.3 adapter側APIは `unresolved_queue` を使う。`main.py` 内部の `xi_pool` 変数名・`/xipool` 表示などはcompatibility表面としてまだ残る。
 
+## Canonical unresolved classification
+
+`resolution_v23.py` の `ResolutionAssessment` を、canonical mismatchが未解決かどうかを判定する明示的なapplication boundaryとする。
+
+```text
+ResolutionAssessment(
+    unresolved,
+    reason,
+    assessor,
+    evidence_refs
+)
+```
+
+`reason` と `assessor` は必須。`CanonicalLeapAuthority` は裸の `True / False` を受け取らない。
+
+意図的に以下のようなshortcut constructorは置かない。
+
+```text
+from_deny(...)
+from_miss(...)
+from_silence(...)
+```
+
+legacy feedback eventは上位評価のevidenceになり得るが、それ自体をcanonical unresolved判定へ変換しない。
+
 ## Canonical reconstruction authority candidate
 
-`authority_v23.py` に `CanonicalLeapAuthority` を追加した。これはまだlive CLIのaction authorityではなく、Step 6の**非権威的な並走候補**である。
+`authority_v23.py` の `CanonicalLeapAuthority` はまだlive CLIのaction authorityではなく、Step 6の**非権威的な並走候補**である。
 
 ```text
 same-model canonical E
-        ↓ explicit unresolved classification
+        ↓ ResolutionAssessment
+unresolved canonical E only
+        ↓
 UnresolvedMismatchState
         ↓ fixed theta
 should_reconstruct
@@ -103,7 +133,19 @@ Core ξ scalar
 
 そのため、それらからcanonical θを動かす経路は存在しない。`model_ref` が変わったturn pairは `model-changed-no-E` として扱い、Eの代替値を作らずHも更新しない。
 
-現段階では `CanonicalLeapAuthority.should_reconstruct` は**候補判定の観測値**であり、`main.py` の修正・隔離・新規学習を発火させない。live cutover前に、unresolved分類契約とlegacy actionとの差分観測を追加で固定する。
+`parallel_v23.py` の `CanonicalParallelObserver` は、legacy `should_leap(0.0)` とcandidate `should_reconstruct` を同じturn pairについて**action非介入で記録**する。
+
+これにより少なくとも次の差を観測できる。
+
+```text
+legacy = leap, canonical = no reconstruction
+legacy = no leap, canonical = reconstruction candidate
+model changed -> canonical comparison unavailable
+```
+
+parallel observerはlegacy loadを消費せず、candidate判定もlegacy修正・隔離・学習を発火させない。
+
+現段階のStep 6残件は、実conversation上での `ResolutionAssessment` 形成規則と、十分な並走差分観測を経たlive action cutoverである。
 
 旧設計書:
 
@@ -117,8 +159,8 @@ Core ξ scalar
 2. **DONE** — conversation eventからcanonical sectionをshadow取得し、same model_refの場合だけ入力F同士を比較可能にする
 3. **PARTIAL** — `xi_pool` の実役割を `UnresolvedInputQueue` として分離し、新APIでは `unresolved_queue` を使用。`main.py` 内部名とCLI表示はcompatibilityとして残存
 4. **DONE** — unresolved-input queue length -> theta のlive runtime結線を切断。キュー診断量は保持
-5. **DONE** — `miss / deny / silence` 等のlegacy feedback eventとcanonical Hを型・更新経路の両方で分離。canonical mismatchを明示的にunresolvedと判定した場合だけcanonical Hへ接続可能
-6. **PARTIAL** — `CanonicalLeapAuthority` をcanonical H + fixed θで実装し、legacy feedback/queue/pressureが侵入できない契約を固定。live action pathへの切替は未実施
+5. **DONE** — `miss / deny / silence` 等のlegacy feedback eventとcanonical Hを型・更新経路の両方で分離
+6. **PARTIAL** — canonical H + fixed θ authority、provenance付き `ResolutionAssessment`、legacy/canonical並走observerを実装。live action pathへの切替は未実施
 7. **NEXT AFTER CUTOVER** — 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
 各段階で既存CLIのsession保存、LLM trust、node graph、SFO profileの回帰を維持する。ただしStep 4以降、pre-v2.3のqueue-driven threshold挙動は意図的に互換対象から外れる。
@@ -131,33 +173,19 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 
 `test_v23_state.py` はcanonical意味境界を固定する。
 
-`test_runtime_v23.py` は少なくとも次を固定する。
+`test_runtime_v23.py` は、shadow wrapper、有限section取得、same-model比較、model drift拒否を固定する。
 
-- shadow wrapperがlegacy応答結果を変更しない
-- 実conversation inputがraw textとは別のfinite `InteractionSection` として取得される
-- input sectionとFを同一視しない
-- same frozen graph/model_refでは入力F比較ができる
-- graph snapshotが変わればfalse same-model Eを作らない
-- graph fingerprintは同じ有限状態に対して決定的
+`test_h_state.py` / `test_dynamics.py` は、queue診断量とlive threshold入力を分離して固定する。
 
-`test_h_state.py` / `test_dynamics.py` はStep 4以降、次を分離して固定する。
+`test_feedback_boundary_v23.py` は、legacy feedback stateとcanonical Hが別型・別更新経路であることを固定する。
 
-- `unresolved_input_pressure()` はキュー長のdiagnosticとして動く
-- live `xi_pressure()` は常に0で、queue lengthをthetaへ結線しない
-- explicit pressureを与えたlegacy threshold実験APIはhistorical regressionとしてのみ残る
-
-`test_feedback_boundary_v23.py` はStep 5として次を固定する。
-
-- `LegacyFeedbackLoadState` と `UnresolvedMismatchState` は別型
-- legacy `miss / deny / silence` はcanonical Hを変更しない
-- resolved canonical mismatchはHへ入らない
-- unresolved canonical mismatchだけがcanonical Hを増やせる
-
-`test_authority_v23.py` はStep 6候補として次を固定する。
+`test_authority_v23.py` / `test_parallel_v23.py` はStep 6候補として次を固定する。
 
 - resolved mismatchはcandidate reconstructionを発火しない
 - unresolved canonical mismatchはfixed θに対する候補再編を発火できる
+- unresolved分類にはreason / assessor / evidenceを持つ `ResolutionAssessment` が必要
+- bare boolや `deny -> unresolved` shortcutを受け付けない
 - model_ref変更はE/Hへ変換しない
 - legacy feedback loadはcandidate authorityを変更しない
 - queue-size diagnosticはcandidate θを変更しない
-- authority APIにpressure/feedback入力口を作らない
+- legacy/canonicalの判定差をaction非介入で記録できる
