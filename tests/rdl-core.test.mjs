@@ -33,7 +33,7 @@ test("Boundary は有限な RIBSection を切り出し、閾値は Core ξ に�
   assert.equal(boundary.threshold(), 0.8);
 });
 
-test("HVector は unresolved mismatch だけを保持し、resolved tick では散逸する", () => {
+test("HVector は unresolved mismatch だけを保持し、H = ||H_vec|| を返す", () => {
   const h = new HVector({
     dimensions: ["resource", "danger"],
     decay: { resource: 0.5, danger: 0.25 },
@@ -46,9 +46,11 @@ test("HVector は unresolved mismatch だけを保持し、resolved tick では�
 
   assertClose(h.snapshot().resource, 1.2);
   assertClose(h.snapshot().danger, 0.05);
+  assertClose(h.norm(), Math.sqrt(1.2 ** 2 + 0.05 ** 2));
   h.dissipateTick();
   assertClose(h.snapshot().resource, 0.6);
   assertClose(h.snapshot().danger, 0.0125);
+  assertClose(h.norm(), Math.sqrt(0.6 ** 2 + 0.0125 ** 2));
 });
 
 test("MBNode は同じ pre-update M_B で RIB_B(t) と RIB_B(t+Δ) を解釈して E を作る", () => {
@@ -84,6 +86,8 @@ test("MBNode は同じ pre-update M_B で RIB_B(t) と RIB_B(t+Δ) を解釈し�
   assert.deepEqual(result.FPrime, { resource: 0.2, motion: 0.8 });
   assertClose(result.E.resource, 0.3);
   assertClose(result.E.motion, 0.4);
+  assertClose(result.H, 0.5);
+  assert.deepEqual(result.HVector, { resource: 0.3, motion: 0.4 });
   assert.deepEqual(result.dMB.previous, { resource: 0.5, motion: 0.8 });
   assert.notDeepEqual(result.dMB.current, result.dMB.previous);
 });
@@ -106,7 +110,8 @@ test("resolved E は観測できるが operational H には保持しない", () 
   });
 
   assert.equal(result.E.x, 1);
-  assert.equal(result.H.x, 0);
+  assert.equal(result.H, 0);
+  assert.equal(result.HVector.x, 0);
   assert.equal(result.leap, null);
 });
 
@@ -134,7 +139,7 @@ test("adaptationPressure はデモ固有診断量であり θ を変更しない
   assert.equal("xi" in node.snapshot(), false);
 });
 
-test("LeapEngine は unresolved H が固定 θ 以上になったときだけ M_delta へ送る", () => {
+test("LeapEngine は scalar H = ||H_vec|| が固定 θ 以上になったとき M_delta へ送る", () => {
   const boundary = new Boundary({
     dimensions: ["danger", "motion"],
     thetaBase: 0.6,
@@ -160,18 +165,22 @@ test("LeapEngine は unresolved H が固定 θ 以上になったときだけ M_
 
   const result = node.compareSections({
     currentSection: boundary.section({ danger: 0, motion: 0 }, { id: "a" }),
-    laterSection: boundary.section({ danger: 1, motion: 0.1 }, { id: "b" }),
+    laterSection: boundary.section({ danger: 0.5, motion: 0.4 }, { id: "b" }),
     unresolved: true,
     tick: 7,
   });
 
+  // Neither component reaches 0.6, but sqrt(0.5^2 + 0.4^2) does.
+  assertClose(result.leap.H, Math.sqrt(0.5 ** 2 + 0.4 ** 2));
+  assert.equal(result.leap.componentPressure, 0.5);
   assert.equal(result.leap.dimension, "danger");
   assert.equal(result.leap.title, "危険仮説を再編");
   assert.equal(result.phase, "M_delta");
   assert.equal(node.leapCount, 1);
   assert.equal(node.leapCooldown, 3);
   assert.equal(node.reliability.danger, 0.5);
-  assert.equal(node.h.snapshot().danger, 0.28);
+  assertClose(node.h.snapshot().danger, 0.14);
+  assertClose(node.h.snapshot().motion, 0.112);
 });
 
 test("LeapEngine の cooldown は即時再跳躍を止める", () => {

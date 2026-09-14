@@ -16,12 +16,16 @@ RIB_B(t+Δ)    -> F'(t+Δ)= interp(M_B, RIB_B(t+Δ))
                   ↓
              E = Δ(F, F')
                   ↓ unresolved only
+                H_vec
+                  ↓ H = ||H_vec||
                   H
                   ↓ H >= θ
              M_Δ -> M_B'
 ```
 
 `F` と `F'` は同じ pre-update `M_B` で解釈する。参照コードでは `MBNode.compareSections()` が、二つの `RIBSection` を同じ frozen reliability で解釈した後に、必要なら局所適応を行う。
+
+Core v2.3 Standard Model の `H = ||H_vec||` に合わせ、この実装では `HVector` が未解消不整合の成分を保持し、L2ノルムを scalar `H` として θ 判定へ渡す。L2の選択自体はこのデモの具体化であり、Coreが唯一のノルムを固定しているという意味ではない。
 
 ## 構成
 
@@ -30,8 +34,8 @@ RIB_B(t+Δ)    -> F'(t+Δ)= interp(M_B, RIB_B(t+Δ))
 | `Boundary` | Purpose / `B` の有限条件 | SILNを生成するものではない |
 | `RIBSection` | デモ上の `RIB_B` 表現 | raw world / 全RIB / `F` ではない |
 | `MBNode` | `M_B` の小さな実装断面 | 人格・個体・SILNそのものではない |
-| `HVector` | unresolved mismatch の保持 | 全ての `E` を自動蓄積しない |
-| `LeapEngine` | `H >= θ` 時の再編候補 | `M_Δ -> M_B'` の簡易デモ |
+| `HVector` | unresolved mismatch の `H_vec` 保持 | `norm()` が canonical scalar `H` を返す |
+| `LeapEngine` | `H >= θ` 時の再編候補 | 最大成分は説明用、判定は scalar `H` |
 | `MBGraph` | 実装断面どうしの有限な関係 | 世界全体の関係ネットワークではない |
 
 ## 最小例
@@ -67,7 +71,7 @@ const result = model.compareSections({
   tick: 1,
 });
 
-console.log(result.F, result.FPrime, result.E, result.H, result.leap);
+console.log(result.F, result.FPrime, result.E, result.HVector, result.H, result.leap);
 ```
 
 ## `ξ` とデモ固有状態
@@ -89,15 +93,36 @@ adaptationPressure
 
 ## H と局所適応
 
-`E = Δ(F,F')` が観測されても、それが解決済みなら `H` へ保持する必要はない。`compareSections({ unresolved: false })` では `E` を返す一方、Hには追加せず既存Hを散逸させる。
+`E = Δ(F,F')` が観測されても、それが解決済みなら `H_vec` へ保持する必要はない。`compareSections({ unresolved: false })` では `E` を返す一方、HVectorには追加せず既存残存を散逸させる。
+
+返り値では、
+
+```text
+result.HVector = 現在の未解消成分 H_vec
+result.H       = ||result.HVector||
+```
+
+を分離する。
 
 `reliability` の微小更新は Core の唯一の更新則ではない。この参照実装が採用する Standard Model / demo-local adaptation であり、`F/F'` 比較の後にのみ行う。
+
+## Function 層との境界
+
+再利用可能な Function 契約は `../functions/` に置き、Coreの `M_B` と同一視しない。
+
+```text
+Function != M_B
+Function != SILN
+Function != RIB_B
+```
 
 ## 方針
 
 - Core記号とデモ固有量を同一視しない。
 - raw inputをそのまま `RIB_B` と呼ばない。
 - `RIB_B != F` を維持する。
+- `H_vec` と scalar `H` を分ける。
 - `ξ` を乱数・誤差・蓄積量として実装しない。
 - 係数は `profiles/` に置き、Core必須定数として扱わない。
+- Functionは `functions/` に置き、`M_B` の別名として実装しない。
 - 耐久・係数探索は `experiment/` で行い、結果を普遍則へ昇格させない。

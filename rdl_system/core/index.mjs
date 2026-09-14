@@ -124,6 +124,17 @@ export class HVector {
     return this.snapshot();
   }
 
+  // Core v2.3 Standard Model: H = ||H_vec||.
+  // This finite demo chooses the Euclidean (L2) norm as its concrete norm.
+  norm() {
+    return Math.sqrt(
+      this.dimensions.reduce((sum, dimension) => {
+        const value = this.values[dimension] ?? 0;
+        return sum + value * value;
+      }, 0),
+    );
+  }
+
   strongest() {
     return Object.entries(this.values)
       .sort((left, right) => right[1] - left[1])[0];
@@ -151,16 +162,19 @@ export class LeapEngine {
 
   maybeLeap(node, tick = 0) {
     if (node.leapCooldown > 0) return null;
-    const [dimension, pressure] = node.h.strongest();
+
+    const H = node.h.norm();
+    const [dimension, componentPressure] = node.h.strongest();
     const threshold = node.boundary.threshold();
-    if (pressure < threshold) return null;
+    if (H < threshold) return null;
 
     const handler = this.handlers[dimension] ?? this.handlers.default;
     const result = handler
-      ? handler({ node, dimension, pressure, threshold, tick })
+      ? handler({ node, dimension, H, componentPressure, pressure: H, threshold, tick })
       : { title: `Leap: ${dimension}`, detail: "M_B reconstruction candidate from unresolved H" };
 
     node.phase = "M_delta";
+    const hVectorBeforeRetention = node.h.snapshot();
     node.h.retainAfterLeap();
     node.leapCount += 1;
     node.leapCooldown = this.cooldownTicks;
@@ -168,7 +182,10 @@ export class LeapEngine {
       tick,
       type: "leap",
       dimension,
-      pressure,
+      H,
+      HVector: hVectorBeforeRetention,
+      componentPressure,
+      pressure: H,
       threshold,
       ...result,
     });
@@ -299,7 +316,8 @@ export class MBNode {
       F: { ...F },
       FPrime: { ...FPrime },
       E: { ...E },
-      H: this.h.snapshot(),
+      H: this.h.norm(),
+      HVector: this.h.snapshot(),
       unresolved,
       dMB,
       adaptationPressure: this.adaptationPressure,
@@ -318,7 +336,8 @@ export class MBNode {
       F: this.lastF ? { ...this.lastF } : null,
       FPrime: this.lastFPrime ? { ...this.lastFPrime } : null,
       E: { ...this.lastError },
-      H: this.h.snapshot(),
+      H: this.h.norm(),
+      HVector: this.h.snapshot(),
       adaptationPressure: this.adaptationPressure,
       theta: this.boundary.threshold(),
       leapCount: this.leapCount,
