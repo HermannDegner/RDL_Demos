@@ -1,46 +1,51 @@
-"""H蓄積とleap判定（h_state.py）"""
+"""Legacy feedback-load and local-threshold regression tests."""
 
 import random
 import unittest
 
 import dynamics
-from h_state import HState, xi_pressure
+from h_state import HState, unresolved_input_pressure, xi_pressure
 
 
-class TestXiPressure(unittest.TestCase):
-    def test_empty_pool_has_no_pressure(self):
-        self.assertEqual(xi_pressure([]), 0.0)
+class TestUnresolvedInputPressure(unittest.TestCase):
+    def test_empty_pool_has_no_diagnostic_pressure(self):
+        self.assertEqual(unresolved_input_pressure([]), 0.0)
 
-    def test_pressure_grows_with_the_pool(self):
-        self.assertLess(xi_pressure(["a"]), xi_pressure(["a", "b", "c"]))
+    def test_diagnostic_pressure_grows_with_the_pool(self):
+        self.assertLess(
+            unresolved_input_pressure(["a"]),
+            unresolved_input_pressure(["a", "b", "c"]),
+        )
 
-    def test_pressure_saturates_at_one(self):
-        self.assertEqual(xi_pressure(["x"] * int(dynamics.CONFIG.xi_saturation * 5)), 1.0)
+    def test_diagnostic_pressure_saturates_at_one(self):
+        self.assertEqual(
+            unresolved_input_pressure(["x"] * int(dynamics.CONFIG.xi_saturation * 5)),
+            1.0,
+        )
 
     def test_zero_saturation_is_harmless(self):
-        self.assertEqual(xi_pressure(["a"], saturation=0), 0.0)
+        self.assertEqual(unresolved_input_pressure(["a"], saturation=0), 0.0)
+
+    def test_live_cli_compatibility_pressure_is_threshold_neutral(self):
+        self.assertEqual(xi_pressure([]), 0.0)
+        self.assertEqual(xi_pressure(["a"]), 0.0)
+        self.assertEqual(xi_pressure(["a", "b", "c"]), 0.0)
 
 
-class TestThetaEff(unittest.TestCase):
-    """Core §6.2: θ_eff(t) = θ + g(ξ(t))"""
+class TestLegacyPressureThresholdExperiment(unittest.TestCase):
+    """Historical bot-local pressure experiment, not current Core theta semantics."""
 
-    def test_no_xi_leaves_theta_untouched(self):
-        """ξが無ければ θ_eff は厳密に θ（既存挙動と一致すること）。"""
+    def test_no_explicit_pressure_leaves_theta_untouched(self):
         h = HState(theta=2.0)
         for _ in range(20):
             self.assertEqual(h.theta_eff(0.0), 2.0)
 
-    def test_xi_lowers_the_boundary_on_average(self):
-        """
-        回帰テスト: ξプールは存在したが θ に一切影響せず、ξ が動態から
-        切り離されていた（Core §6.2 の g(ξ) が未実装）。
-        """
+    def test_explicit_legacy_pressure_lowers_the_boundary_on_average(self):
         h = HState(theta=2.0, rng=random.Random(0))
         samples = [h.theta_eff(1.0) for _ in range(200)]
         self.assertLess(sum(samples) / len(samples), 2.0)
 
-    def test_xi_makes_the_boundary_fluctuate(self):
-        """Core は ξ が閾値を『揺らす』と定める。決定的な線ではなくなること。"""
+    def test_explicit_legacy_pressure_makes_the_boundary_fluctuate(self):
         h = HState(theta=2.0, rng=random.Random(0))
         samples = {round(h.theta_eff(1.0), 6) for _ in range(50)}
         self.assertGreater(len(samples), 1)
@@ -50,34 +55,33 @@ class TestThetaEff(unittest.TestCase):
         for _ in range(500):
             self.assertGreater(h.theta_eff(1.0), 0.0)
 
-    def test_more_xi_widens_the_swing(self):
+    def test_more_explicit_pressure_widens_the_legacy_swing(self):
         h = HState(theta=2.0, rng=random.Random(1))
+
         def spread(p):
-            s = [h.theta_eff(p) for _ in range(400)]
-            return max(s) - min(s)
+            samples = [h.theta_eff(p) for _ in range(400)]
+            return max(samples) - min(samples)
+
         self.assertGreater(spread(1.0), spread(0.3))
 
-    def test_xi_makes_leaping_easier(self):
-        """同じHでも、ξが溜まっていれば跳躍しやすくなること。"""
+    def test_explicit_legacy_pressure_can_make_leaping_easier(self):
         def leaps(pressure, seed):
             h = HState(theta=2.0, rng=random.Random(seed))
-            h.on_deny("A"); h.on_deny("A")   # H_post=2.0 — θちょうどでは超えない
+            h.on_deny("A")
+            h.on_deny("A")
             return h.should_leap(pressure)[0]
-        self.assertFalse(leaps(0.0, 0))
-        self.assertTrue(any(leaps(1.0, s) for s in range(20)))
 
-    def test_summary_reports_theta_eff(self):
-        self.assertIn("θ_eff", HState(theta=2.0).summary(0.5))
+        self.assertFalse(leaps(0.0, 0))
+        self.assertTrue(any(leaps(1.0, seed) for seed in range(20)))
+
+    def test_summary_reports_legacy_theta_eff(self):
+        self.assertIn("legacy_theta_eff", HState(theta=2.0).summary(0.5))
 
 
 class TestDissipation(unittest.TestCase):
-    """NN借用 v0.1 §4: dH_vec/dt の -A·H_vec 項"""
+    """Legacy node-local feedback-load dissipation."""
 
     def test_heat_dissipates_passively(self):
-        """
-        回帰テスト: H が自然に減る経路が無く、完全ヒット・同意・leap という
-        離散イベントでしか下がらなかった。
-        """
         h = HState(theta=2.0)
         h.on_deny("A")
         h.dissipate({"A": 0.1})
@@ -92,7 +96,6 @@ class TestDissipation(unittest.TestCase):
         self.assertAlmostEqual(h.H_post["A"], 0.5)
 
     def test_heat_lingers_on_weak_directions(self):
-        """慣性の弱い方向ほど熱が残ること（散逸速度の差が指向性を作る）。"""
         h = HState(theta=2.0)
         h.on_deny("strong")
         h.on_deny("weak")
@@ -102,7 +105,7 @@ class TestDissipation(unittest.TestCase):
 
     def test_unknown_ids_are_ignored(self):
         h = HState(theta=2.0)
-        h.dissipate({"nope": 0.5})   # 例外を出さないこと
+        h.dissipate({"nope": 0.5})
         self.assertEqual(h.H_post, {})
 
     def test_rate_is_clamped(self):
@@ -118,8 +121,8 @@ class TestDissipation(unittest.TestCase):
 class TestMergedH(unittest.TestCase):
     def test_combines_pre_and_post_with_weights(self):
         h = HState(theta=2.0)
-        h.on_miss("A")      # H_pre += 0.5
-        h.on_deny("A")      # H_post += 1.0
+        h.on_miss("A")
+        h.on_deny("A")
         self.assertAlmostEqual(h.merged_h("A"), 0.5 * HState.H_PRE_WEIGHT + 1.0)
 
     def test_untouched_node_is_zero(self):
@@ -130,12 +133,12 @@ class TestLeapThreshold(unittest.TestCase):
     def test_h_pre_is_weighted_lighter_than_h_post(self):
         h = HState(theta=2.0)
         for _ in range(5):
-            h.on_miss("A")   # +0.5 ×5 = 2.5 → ×0.4 = 1.0
+            h.on_miss("A")
         self.assertFalse(h.should_leap()[0])
 
         h2 = HState(theta=2.0)
         for _ in range(3):
-            h2.on_deny("A")  # +1.0 ×3 = 3.0（重み1.0）
+            h2.on_deny("A")
         self.assertEqual(h2.should_leap(), (True, "A"))
 
     def test_agree_cools_the_node(self):
@@ -144,7 +147,7 @@ class TestLeapThreshold(unittest.TestCase):
             h.on_deny("A")
         self.assertTrue(h.should_leap()[0])
         for _ in range(4):
-            h.on_agree("A")  # ×0.7 ずつ
+            h.on_agree("A")
         self.assertFalse(h.should_leap()[0])
 
     def test_leap_done_decays_both_pre_and_post(self):
@@ -169,10 +172,6 @@ class TestThetaDynamics(unittest.TestCase):
         self.assertEqual(h.theta, 5.0)
 
     def test_relax_theta_returns_toward_base(self):
-        """
-        回帰テスト: 以前は θ を上げる経路しかなく、一度上限に張り付くと
-        二度と下がらなかった（設計書 §2 は「動的調整」と規定）。
-        """
         h = HState(theta=2.0)
         for _ in range(200):
             h.leap_done("A")
@@ -198,13 +197,9 @@ class TestForgetAndPrune(unittest.TestCase):
         self.assertNotIn("ghost", h.H_post)
 
     def test_phantom_id_no_longer_blocks_real_nodes(self):
-        """
-        回帰テスト: 修正対象が存在しない疑似ID（__llm__ など）にHが溜まると、
-        毎ターン should_leap() の最大値を占め続け実ノードのleapを妨げていた。
-        """
         h = HState(theta=2.0)
         for _ in range(3):
-            h.on_deny("__llm__")     # 実ノードに対応しない
+            h.on_deny("__llm__")
         for _ in range(3):
             h.on_deny("real-node")
         self.assertEqual(h.should_leap()[1], "__llm__")
@@ -227,7 +222,6 @@ class TestForgetAndPrune(unittest.TestCase):
         self.assertEqual(h.prune({"alive", "other"}), 0)
 
     def test_prune_keeps_the_pending_miss_bucket(self):
-        """未解決入力の蓄積は実ノードではないが、退場処理の巻き添えにしない。"""
         h = HState(theta=2.0)
         h.on_miss(None)
         h.prune(set())
@@ -236,10 +230,6 @@ class TestForgetAndPrune(unittest.TestCase):
 
 class TestPendingMiss(unittest.TestCase):
     def test_miss_without_nearest_goes_to_the_pending_bucket(self):
-        """
-        回帰テスト: 最近傍が無い未知入力のHを無関係な既存ノードへ積むと、
-        そのノードが後で誤って修正・隔離の対象に選ばれてしまう。
-        """
         h = HState(theta=2.0)
         h.on_miss(None)
         self.assertEqual(list(h.H_pre), [HState.PENDING_MISS_ID])
@@ -286,10 +276,6 @@ class TestEventTracking(unittest.TestCase):
 
 class TestDriftDeltas(unittest.TestCase):
     def test_events_are_counted_once(self):
-        """
-        回帰テスト: 以前は毎回history全体を数え直しており、同じイベントが
-        M_Δ相のたびにdrift_factorへ繰り返し加算されていた。
-        """
         h = HState()
         h.on_deny("A")
         h.on_agree("A")
@@ -317,7 +303,6 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(len(restored.history), len(h.history))
 
     def test_legacy_state_without_theta_base(self):
-        """theta_base 未保存の旧セッションで、上がりきったθが下限に固定されないこと。"""
         restored = HState.from_dict({"theta": 4.5, "H_pre": {}, "H_post": {}})
         self.assertEqual(restored.theta, 4.5)
         self.assertEqual(restored.theta_base, 2.0)
