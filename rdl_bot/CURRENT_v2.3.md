@@ -3,6 +3,9 @@
 Status: **migration in progress / opt-in canonical action authority operational**  
 Normative semantic reference: `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3.
 
+中断後の検証結果、Core / Functionsとの対応、残作業は
+[`MIGRATION_CHECKPOINT_v23.md`](./MIGRATION_CHECKPOINT_v23.md) を参照。
+
 `rdl_bot` は旧RDL世代から継続する会話実験であり、`EFP`、`xi_pool`、`H_pre/H_post` 等のpre-v2.3名がまだ残る。これらを現行Core記号と同一視しない。
 
 ## 1. Canonical comparison

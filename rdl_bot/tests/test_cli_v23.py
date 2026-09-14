@@ -60,9 +60,12 @@ class _LLM:
     def available(self):
         return self._available
 
-    def ask_for_node_revision(self, node, user_input=None):
-        self.calls.append((node.id, user_input))
+    def ask_for_canonical_node_revision(self, node, request):
+        self.calls.append((node.id, request))
         return self.revised
+
+    def ask_for_node_revision(self, node, user_input=None):
+        raise AssertionError("canonical CLI must not use legacy H/deny revision")
 
 
 class _LegacyMain:
@@ -211,6 +214,14 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertIn("node-a", graph.nodes["node-b"].relations)
         self.assertEqual(len(session.executions), 1)
         self.assertTrue(session.executions[0].mutated)
+        self.assertEqual(len(llm.calls), 1)
+        target_ref, request = llm.calls[0]
+        self.assertEqual(target_ref, "node-a")
+        self.assertEqual(request.assessment_reason, "reviewed canonical mismatch")
+        self.assertEqual(request.assessment_assessor, "cli-user")
+        self.assertIn("turn-1", request.evidence_refs)
+        self.assertIn("turn-2", request.evidence_refs)
+        self.assertIn("cli-review:1-2", request.evidence_refs)
         self.assertIn("mutation=mutated-with-llm-revision", output.getvalue())
 
     def test_successful_execute_is_one_shot_for_same_review(self):
