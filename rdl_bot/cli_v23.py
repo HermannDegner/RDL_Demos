@@ -6,17 +6,14 @@ Usage::
     python cli_v23.py --seed
 
 The default ``main.py`` entrypoint is intentionally untouched.  This module
-installs narrow wrappers around ``main.respond`` and ``main.handle_command`` so
-the ordinary CLI loop, feedback handling, persistence, LLM trust and legacy
-action authority all keep working exactly as before while
-``CanonicalMigrationSession`` records adjacent turn comparisons.
-
-Canonical observations are non-authoritative here:
+wraps ``main.respond`` and ``main.handle_command`` so the ordinary legacy CLI
+remains authoritative while canonical v2.3 state is observed beside it.
 
 - non-zero E becomes pending-review;
 - canonical H is never updated automatically;
 - ``/v23`` is read-only diagnostics;
-- ``/v23 resolve ...`` and ``/v23 unresolved ...`` are explicit human reviews;
+- ``/v23 resolve ...`` / ``/v23 unresolved ...`` are explicit reviews;
+- ``/v23 plan`` is a dry-run reconstruction/target preview;
 - no v2.3 command in this module mutates the node graph.
 """
 
@@ -24,9 +21,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-try:  # package-style imports
+try:
     from .migration_session_v23 import CanonicalMigrationSession
-except ImportError:  # direct ``python cli_v23.py`` execution
+except ImportError:
     from migration_session_v23 import CanonicalMigrationSession  # type: ignore
 
 
@@ -51,21 +48,15 @@ def _print_shadow_status(session: CanonicalMigrationSession) -> None:
             f"reasons={reasons} evidence={refs}"
         )
     if session.reviews:
-        latest_review = session.reviews[-1]
+        review = session.reviews[-1]
         print(
-            f"    latest_review={latest_review.earlier_index}->{latest_review.later_index} "
-            f"disposition={latest_review.disposition} "
-            f"assessor={latest_review.assessment.assessor}"
+            f"    latest_review={review.earlier_index}->{review.later_index} "
+            f"disposition={review.disposition} assessor={review.assessment.assessor}"
         )
     print("    /v23 alone is read-only; shadow CLI never mutates the node graph")
 
 
-def _review_latest_pending(
-    session: CanonicalMigrationSession,
-    *,
-    disposition: str,
-    reason: str,
-) -> None:
+def _review_latest_pending(session: CanonicalMigrationSession, *, disposition: str, reason: str) -> None:
     pending = session.pending_records
     if not pending:
         print("  [v2.3 shadow] pending-review はありません。")
@@ -105,6 +96,23 @@ def _review_latest_pending(
     print("  [v2.3 review] canonical Hのみ更新。node graph mutationは実行しません。")
 
 
+def _print_plan_preview(session: CanonicalMigrationSession) -> None:
+    preview = session.preview_latest_reconstruction()
+    print(f"  [v2.3 plan] status={preview.status}")
+    if preview.request is not None:
+        print(
+            f"    H={preview.request.h_magnitude:.3f} θ={preview.request.theta:.3f} "
+            f"reasons={preview.request.mismatch_reasons}"
+        )
+    if preview.plan is not None:
+        print(
+            f"    target={preview.plan.target_ref} "
+            f"candidates={preview.plan.candidate_refs} "
+            f"evidence_turns={preview.plan.evidence_turns}"
+        )
+    print("    dry-run only; node graph mutationは実行しません。")
+
+
 def _handle_v23_command(cmd: str, session: CanonicalMigrationSession) -> bool:
     parts = cmd.strip().split(maxsplit=2)
     if not parts or parts[0] != "/v23":
@@ -121,12 +129,16 @@ def _handle_v23_command(cmd: str, session: CanonicalMigrationSession) -> bool:
     if subcommand == "unresolved":
         _review_latest_pending(session, disposition="unresolved", reason=reason)
         return True
+    if subcommand == "plan":
+        _print_plan_preview(session)
+        return True
 
     print("  v2.3 shadow commands:")
     print("    /v23")
     print("    /v23 resolve <reason>")
     print("    /v23 unresolved <reason>")
-    print("  reviewはcanonical状態だけを更新し、node graphは変更しません。")
+    print("    /v23 plan")
+    print("  review/planはcanonical状態だけを扱い、node graphは変更しません。")
     return True
 
 
@@ -135,13 +147,7 @@ def install_shadow_session(
     *,
     session: CanonicalMigrationSession | None = None,
 ) -> CanonicalMigrationSession:
-    """Wrap legacy response/command hooks with opt-in canonical observation.
-
-    The response wrapper preserves the legacy function signature because
-    ``main.main`` calls the global ``respond`` symbol directly.  The command
-    wrapper intercepts only ``/v23`` commands and delegates every other command
-    to the original handler.  Graph mutation authority remains legacy.
-    """
+    """Wrap legacy response/command hooks with opt-in canonical observation."""
 
     if session is None:
         session = CanonicalMigrationSession()
@@ -149,15 +155,7 @@ def install_shadow_session(
     original_respond: Callable[..., tuple[str, str]] = legacy_main.respond
     original_handle_command: Callable[..., bool] | None = getattr(legacy_main, "handle_command", None)
 
-    def shadowed_respond(
-        user_input,
-        graph,
-        h,
-        llm,
-        sfo_profile,
-        unresolved_queue,
-        llm_trust,
-    ):
+    def shadowed_respond(user_input, graph, h, llm, sfo_profile, unresolved_queue, llm_trust):
         return session.respond(
             user_input,
             graph,
@@ -191,7 +189,7 @@ def main() -> None:
     install_shadow_session(legacy_main)
     print("  [v2.3 shadow] canonical comparison enabled; legacy graph-mutation authority unchanged")
     print("  [v2.3 shadow] non-zero canonical E is pending until explicit /v23 review")
-    print("  [v2.3 shadow] /v23 reviews can update canonical H but never mutate the graph")
+    print("  [v2.3 shadow] /v23 plan is dry-run only; v2.3 commands never mutate the graph")
     legacy_main.main()
 
 
