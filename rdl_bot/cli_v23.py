@@ -1,4 +1,4 @@
-"""Opt-in Core v2.3 shadow CLI for rdl_bot.
+"""Opt-in Core v2.3 reviewed CLI for rdl_bot.
 
 Usage::
 
@@ -7,15 +7,17 @@ Usage::
 
 The default ``main.py`` entrypoint is intentionally untouched.  This module
 wraps ``main.respond`` and ``main.handle_command`` so the ordinary legacy CLI
-remains authoritative while canonical v2.3 state is observed beside it.
+remains authoritative by default while canonical v2.3 state is observed beside
+it.
 
 - non-zero E becomes pending-review;
 - canonical H is never updated automatically;
 - ``/v23`` is read-only diagnostics;
 - ``/v23 resolve ...`` / ``/v23 unresolved ...`` are explicit reviews;
 - ``/v23 plan`` is a dry-run reconstruction/target preview;
-- no v2.3 command in this module mutates the node graph;
-- canonical review/H state is persisted, but frozen evaluators are not.
+- ``/v23 execute`` is the only explicit canonical mutation command;
+- successful canonical mutation is one-shot per reviewed turn pair;
+- canonical review/H/execution audit is persisted, but frozen evaluators are not.
 
 After restart a fresh comparison window begins at the next monotonic turn id.
 No cross-restart E is manufactured from a recreated evaluator.
@@ -27,9 +29,11 @@ from typing import Any, Callable
 
 try:
     from .migration_session_v23 import CanonicalMigrationSession
+    from .mutation_v23 import make_llm_revision_mutation
     from .persistence_v23 import load_session, save_session
 except ImportError:
     from migration_session_v23 import CanonicalMigrationSession  # type: ignore
+    from mutation_v23 import make_llm_revision_mutation  # type: ignore
     from persistence_v23 import load_session, save_session  # type: ignore
 
 
@@ -42,7 +46,8 @@ def _print_shadow_status(session: CanonicalMigrationSession) -> None:
     print("  v2.3 shadow status:")
     print(
         f"    turns_in_window={len(session.shadow.turns)} last_turn_id={session.shadow.last_assigned_index} "
-        f"assessments={len(session.assessments)} pending={len(pending)} reviews={len(session.reviews)}"
+        f"assessments={len(session.assessments)} pending={len(pending)} reviews={len(session.reviews)} "
+        f"executions={len(session.executions)}"
     )
     print(
         f"    canonical_H={authority.h_magnitude:.3f} "
@@ -62,7 +67,14 @@ def _print_shadow_status(session: CanonicalMigrationSession) -> None:
             f"    latest_review={review.earlier_index}->{review.later_index} "
             f"disposition={review.disposition} assessor={review.assessment.assessor}"
         )
-    print("    /v23 alone is read-only; shadow CLI never mutates the node graph")
+    if session.executions:
+        execution = session.executions[-1]
+        print(
+            f"    latest_execution={execution.earlier_index}->{execution.later_index} "
+            f"executor={execution.executor_status} mutation={execution.mutation_status} "
+            f"target={execution.target_ref}"
+        )
+    print("    /v23 status/review/plan are non-mutating; only explicit /v23 execute may mutate")
 
 
 def _review_latest_pending(session: CanonicalMigrationSession, *, disposition: str, reason: str) -> None:
@@ -122,7 +134,38 @@ def _print_plan_preview(session: CanonicalMigrationSession) -> None:
     print("    dry-run only; node graph mutationは実行しません。")
 
 
-def _handle_v23_command(cmd: str, session: CanonicalMigrationSession) -> bool:
+def _execute_latest(session: CanonicalMigrationSession, *, graph: Any, llm: Any) -> None:
+    if graph is None or llm is None:
+        print("  [v2.3 execute] graph / llm context が利用できません。変更しません。")
+        return
+
+    result = session.execute_latest_reconstruction(
+        mutate=make_llm_revision_mutation(graph, llm),
+    )
+    print(f"  [v2.3 execute] status={result.status}")
+    if result.plan is not None:
+        print(
+            f"    target={result.plan.target_ref} candidates={result.plan.candidate_refs} "
+            f"evidence_turns={result.plan.evidence_turns}"
+        )
+    if result.execution is not None:
+        callback_result = result.execution.result
+        mutation_status = getattr(callback_result, "status", None)
+        replacement_ref = getattr(callback_result, "replacement_ref", None)
+        print(
+            f"    executor={result.execution.status} target={result.execution.target_ref} "
+            f"mutation={mutation_status} replacement={replacement_ref}"
+        )
+    print("    canonical review済みtargetだけを使用。legacy H / hot-nodeは参照しません。")
+
+
+def _handle_v23_command(
+    cmd: str,
+    session: CanonicalMigrationSession,
+    *,
+    graph: Any = None,
+    llm: Any = None,
+) -> bool:
     parts = cmd.strip().split(maxsplit=2)
     if not parts or parts[0] != "/v23":
         return False
@@ -141,13 +184,17 @@ def _handle_v23_command(cmd: str, session: CanonicalMigrationSession) -> bool:
     if subcommand == "plan":
         _print_plan_preview(session)
         return True
+    if subcommand == "execute":
+        _execute_latest(session, graph=graph, llm=llm)
+        return True
 
-    print("  v2.3 shadow commands:")
+    print("  v2.3 commands:")
     print("    /v23")
     print("    /v23 resolve <reason>")
     print("    /v23 unresolved <reason>")
     print("    /v23 plan")
-    print("  review/planはcanonical状態だけを扱い、node graphは変更しません。")
+    print("    /v23 execute")
+    print("  executeだけが明示的なcanonical graph mutationを試行します。")
     return True
 
 
@@ -159,10 +206,10 @@ def install_shadow_session(
 ) -> CanonicalMigrationSession:
     """Wrap legacy response/command hooks with opt-in canonical observation.
 
-    When ``state_path`` is supplied, canonical review/H state is loaded once and
-    atomically saved after every observed turn and every ``/v23`` command.
-    Frozen evaluators are never persisted; restored sessions start a fresh
-    comparison window at the next turn id.
+    When ``state_path`` is supplied, canonical review/H/execution state is loaded
+    once and atomically saved after every observed turn and every ``/v23``
+    command.  Frozen evaluators are never persisted; restored sessions start a
+    fresh comparison window at the next turn id.
     """
 
     if session is None:
@@ -193,7 +240,9 @@ def install_shadow_session(
 
     if original_handle_command is not None:
         def shadowed_handle_command(cmd, *args, **kwargs):
-            if _handle_v23_command(cmd, session):
+            llm = args[0] if len(args) >= 1 else kwargs.get("llm")
+            graph = args[1] if len(args) >= 2 else kwargs.get("graph")
+            if _handle_v23_command(cmd, session, graph=graph, llm=llm):
                 persist()
                 return True
             return original_handle_command(cmd, *args, **kwargs)
@@ -210,12 +259,13 @@ def main() -> None:
         import main as legacy_main  # type: ignore
 
     session = install_shadow_session(legacy_main, state_path=V23_SESSION_STATE_PATH)
-    print("  [v2.3 shadow] canonical comparison enabled; legacy graph-mutation authority unchanged")
-    print("  [v2.3 shadow] non-zero canonical E is pending until explicit /v23 review")
-    print("  [v2.3 shadow] /v23 plan is dry-run only; v2.3 commands never mutate the graph")
+    print("  [v2.3] canonical comparison enabled; default legacy action authority remains unchanged")
+    print("  [v2.3] non-zero canonical E is pending until explicit /v23 review")
+    print("  [v2.3] /v23 plan is dry-run; /v23 execute is explicit one-shot canonical mutation")
     print(
-        f"  [v2.3 shadow] durable canonical state: last_turn_id={session.shadow.last_assigned_index} "
-        f"pending={len(session.pending_records)} reviews={len(session.reviews)}"
+        f"  [v2.3] durable state: last_turn_id={session.shadow.last_assigned_index} "
+        f"pending={len(session.pending_records)} reviews={len(session.reviews)} "
+        f"executions={len(session.executions)}"
     )
     try:
         legacy_main.main()
