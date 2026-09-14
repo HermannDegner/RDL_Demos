@@ -16,6 +16,7 @@ from .core import (
     Phase,
     XiPool,
 )
+from . import dialogue_local_aliases as _dialogue_local_aliases  # noqa: F401
 from .npc import VillageNPC
 from .profiles import REFERENCE_PROFILE, VILLAGE_PROFILE, Profile
 from .simulation import VillageObserver, VillageSimulation
