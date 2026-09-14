@@ -8,8 +8,7 @@ reconstruction automatically.
 Non-zero E becomes ``pending-review`` only.  A pending record can be explicitly
 reviewed as either resolved or unresolved with provenance.  Only an unresolved
 review updates canonical H.  A reviewed unresolved observation can then be
-planned in dry-run mode without mutating the graph.  Mutation remains a separate
-explicit call through the candidate pipeline.
+planned in dry-run mode.  Mutation requires a separate explicit execution call.
 """
 
 from __future__ import annotations
@@ -66,6 +65,19 @@ class SessionPlanPreview:
     plan: Optional[ReconstructionTargetPlan] = None
 
 
+@dataclass(frozen=True)
+class SessionExecution:
+    earlier_index: int
+    later_index: int
+    executor_status: str
+    target_ref: Optional[str]
+    mutation_status: Optional[str]
+
+    @property
+    def mutated(self) -> bool:
+        return self.mutation_status == "mutated-with-llm-revision"
+
+
 @dataclass
 class CanonicalMigrationSession:
     """Observe live turns and retain explicit canonical review state."""
@@ -77,6 +89,7 @@ class CanonicalMigrationSession:
     pipeline: CanonicalReconstructionPipeline = field(init=False)
     assessments: list[RuntimeAssessmentRecord] = field(default_factory=list)
     reviews: list[SessionReview] = field(default_factory=list)
+    executions: list[SessionExecution] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         authority = CanonicalLeapAuthority(theta=self.theta, decay=self.decay)
@@ -92,6 +105,23 @@ class CanonicalMigrationSession:
             if (review.earlier_index, review.later_index) == key:
                 return review
         return None
+
+    def _latest_unresolved_review(self) -> Optional[SessionReview]:
+        return next(
+            (
+                item
+                for item in reversed(self.reviews)
+                if item.disposition == "unresolved" and item.authority_observation is not None
+            ),
+            None,
+        )
+
+    def _was_successfully_mutated(self, review: SessionReview) -> bool:
+        key = (review.earlier_index, review.later_index)
+        return any(
+            (item.earlier_index, item.later_index) == key and item.mutated
+            for item in self.executions
+        )
 
     def _require_pending_record(self, record: RuntimeAssessmentRecord) -> None:
         if record not in self.assessments:
@@ -198,14 +228,7 @@ class CanonicalMigrationSession:
     def preview_latest_reconstruction(self) -> SessionPlanPreview:
         """Dry-run the latest unresolved review through gate + target planner only."""
 
-        review = next(
-            (
-                item
-                for item in reversed(self.reviews)
-                if item.disposition == "unresolved" and item.authority_observation is not None
-            ),
-            None,
-        )
+        review = self._latest_unresolved_review()
         if review is None:
             return SessionPlanPreview(status="no-unresolved-review")
 
@@ -218,6 +241,61 @@ class CanonicalMigrationSession:
             status=plan.status,
             request=request,
             plan=plan,
+        )
+
+    def execute_latest_reconstruction(
+        self,
+        *,
+        mutate: Callable[..., Any],
+    ) -> CanonicalPipelineResult:
+        """Explicitly execute the latest reviewed canonical reconstruction once.
+
+        No review or H update occurs here.  The method operates only on the latest
+        already-unresolved review.  A successful graph mutation is one-shot for
+        that review; no-mutation attempts (for example LLM unavailable) are
+        audited but may be retried later.
+        """
+
+        review = self._latest_unresolved_review()
+        if review is None:
+            return CanonicalPipelineResult(status="no-unresolved-review")
+        if self._was_successfully_mutated(review):
+            return CanonicalPipelineResult(status="already-executed-canonical-review")
+
+        preview = self.preview_latest_reconstruction()
+        if preview.request is None or preview.plan is None:
+            return CanonicalPipelineResult(
+                status=preview.status,
+                request=preview.request,
+                plan=preview.plan,
+            )
+        if preview.plan.status != "target-proposed":
+            return CanonicalPipelineResult(
+                status=preview.plan.status,
+                request=preview.request,
+                plan=preview.plan,
+            )
+
+        execution = self.pipeline.executor.execute(
+            preview.request,
+            preview.plan,
+            mutate=mutate,
+        )
+        mutation_status = getattr(execution.result, "status", None)
+        self.executions.append(
+            SessionExecution(
+                earlier_index=review.earlier_index,
+                later_index=review.later_index,
+                executor_status=execution.status,
+                target_ref=execution.target_ref,
+                mutation_status=str(mutation_status) if mutation_status is not None else None,
+            )
+        )
+        return CanonicalPipelineResult(
+            status=execution.status,
+            request=preview.request,
+            plan=preview.plan,
+            execution=execution,
         )
 
     def review_and_execute(
