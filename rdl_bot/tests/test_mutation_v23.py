@@ -38,14 +38,19 @@ class _LLM:
         self.mode = mode
         self._available = available
         self.revised = revised
-        self.calls = []
+        self.canonical_calls = []
+        self.legacy_calls = []
 
     def available(self):
         return self._available
 
-    def ask_for_node_revision(self, node, user_input=None):
-        self.calls.append((node.id, user_input))
+    def ask_for_canonical_node_revision(self, node, request):
+        self.canonical_calls.append((node.id, request.assessment_reason, request.evidence_refs))
         return self.revised
+
+    def ask_for_node_revision(self, node, user_input=None):
+        self.legacy_calls.append((node.id, user_input))
+        raise AssertionError("canonical mutation must not call legacy H/deny revision prompt")
 
 
 def _request():
@@ -85,7 +90,11 @@ class CanonicalMutationTests(unittest.TestCase):
         self.assertIn("old", graph.nodes["new"].relations)
         self.assertEqual(graph.relation_updates, [("old", ("new",))])
         self.assertEqual(graph.saved, 1)
-        self.assertEqual(llm.calls, [("old", None)])
+        self.assertEqual(
+            llm.canonical_calls,
+            [("old", "reviewed unresolved", ("turn-1", "turn-2"))],
+        )
+        self.assertEqual(llm.legacy_calls, [])
 
     def test_llm_off_does_not_mutate(self):
         graph = _Graph()
@@ -96,7 +105,8 @@ class CanonicalMutationTests(unittest.TestCase):
         self.assertEqual(tuple(graph.nodes), ("old",))
         self.assertEqual(graph.nodes["old"].status, "active")
         self.assertEqual(graph.saved, 0)
-        self.assertEqual(llm.calls, [])
+        self.assertEqual(llm.canonical_calls, [])
+        self.assertEqual(llm.legacy_calls, [])
 
     def test_unavailable_llm_does_not_mutate(self):
         graph = _Graph()
@@ -116,6 +126,7 @@ class CanonicalMutationTests(unittest.TestCase):
         self.assertEqual(graph.nodes["old"].status, "active")
         self.assertAlmostEqual(graph.nodes["old"].confidence, 0.8)
         self.assertEqual(graph.saved, 0)
+        self.assertEqual(llm.legacy_calls, [])
 
     def test_missing_target_does_not_call_llm(self):
         graph = _Graph()
@@ -123,7 +134,8 @@ class CanonicalMutationTests(unittest.TestCase):
         result = make_llm_revision_mutation(graph, llm)("missing", _request(), _plan())
 
         self.assertEqual(result.status, "not-mutated-target-missing")
-        self.assertEqual(llm.calls, [])
+        self.assertEqual(llm.canonical_calls, [])
+        self.assertEqual(llm.legacy_calls, [])
         self.assertEqual(graph.saved, 0)
 
 
