@@ -141,6 +141,37 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertEqual(tuple(graph.nodes), before_nodes)
         self.assertIn("node graph mutationは実行しません", output.getvalue())
 
+    def test_plan_after_unresolved_review_is_dry_run_only(self):
+        legacy, session, graph = installed_pending_session(theta=0.5)
+        before_nodes = tuple(graph.nodes)
+        legacy.handle_command(
+            "/v23 unresolved finite review cannot account for mismatch",
+            None,
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            handled = legacy.handle_command("/v23 plan", None)
+
+        self.assertTrue(handled)
+        self.assertEqual(legacy.command_calls, [])
+        self.assertEqual(tuple(graph.nodes), before_nodes)
+        self.assertIn("status=target-proposed", output.getvalue())
+        self.assertIn("target=node-a", output.getvalue())
+        self.assertIn("dry-run only", output.getvalue())
+
+    def test_plan_without_unresolved_review_does_not_create_one(self):
+        legacy, session, _ = installed_pending_session(theta=0.5)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            legacy.handle_command("/v23 plan", None)
+
+        self.assertEqual(len(session.pending_records), 1)
+        self.assertEqual(len(session.reviews), 0)
+        self.assertEqual(session.controller.authority.h_magnitude, 0.0)
+        self.assertIn("status=no-unresolved-review", output.getvalue())
+
     def test_review_reason_is_required(self):
         legacy, session, _ = installed_pending_session()
         output = io.StringIO()
