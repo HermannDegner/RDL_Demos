@@ -77,3 +77,27 @@ FunctionsのNN借用文書はHを未解消不整合と定義する一方、ま�
 4. 通常入口のauthority切替は未実施。互換APIの隔離と他デモのCore同期は別途追跡する。
 
 再起動時はreview/Hを復元するが凍結評価器は復元しない。旧証拠で対象を計画できない状態を未実装の自動再実行で補わない。
+
+
+## 続行分: 旧処理の責務と診断表示の同期
+
+前段コミット `ba640ad` のPR / push CIはともに成功した。以下を追加で確認・修正した。
+
+| 処理 | 現在の責務 | 今回の扱い |
+|---|---|---|
+| `Node.inertia/kappa/reinforce` | confidence・使用・承認に基づく局所適応 | 数式を維持。Core必須則・ノード=M_Bという説明を訂正 |
+| `dissipation_rates` → `LegacyFeedbackLoadState.dissipate` | 旧feedback/loadの減衰 | Functionsの散逸候補との関係を明示。canonical Hの減衰とは別 |
+| `_reinforce_along_v_b` | 通常入口の旧H/θ依存slack | 互換処理として維持。authority入口のthreshold-neutral helperとは区別 |
+| `_decide_leap` → `_correct_node` | 旧負荷による置換・隔離 | 通常入口では残存、authority入口では遮断。今回変更なし |
+| `_learn_new_node`・partial裁定 | LLM相談による新規ノード取得 | 構造を変更する通常学習。Coreの再編と同一視しない。今回変更なし |
+| `metabolize` | タイマーによる減衰・退場・キュー再評価・drift | H/θ判定を経ないため表示をmaintenanceに訂正。追加・削除は従来どおり残る |
+| `phase0_seed` / bootstrap | 初期データの投入 | 再編認可とは別。今回変更なし |
+| canonical review/plan/execute | 未解消Eの審査・対象計画・明示実行 | 前段で検証済みの経路を維持 |
+
+`/h`は、常に0の互換pressureをCore ξと見なして𝒦を逆算する表示を廃止した。代わりにローカル慣性、キュー件数、正規化されたqueue診断を表示する。診断量を閾値へ接続してはいない。
+
+`/dyn`は、旧pressureモデルの仮定計算とlive CLIでの切断を区別する。`/xipool`というコマンド名・保存キーは維持し、内容は未処理入力キューと表示する。
+
+旧テストの「キューが閾値へ結線されている」という名前も訂正した。実際にはキューを渡さずpressureを直接注入する互換実験であり、その既存アサーションは変更していない。
+
+続行分の検証: Bot全341テスト成功。診断コマンドを実行してグラフ・旧負荷・キューが変わらないことを確認。次の未完了事項は通常入口のauthority切替と、canonical実行の例外・保存境界の確認である。今回、変更権限の追加や入口切替は行っていない。

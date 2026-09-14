@@ -295,7 +295,7 @@ opt-in canonical authority mode disables legacy mutation authority
 
 1. **DONE** — canonical `InteractionSection / F / F' / E / unresolved H / CoverageState`
 2. **DONE** — pre-update evaluator凍結、later section replay、route identityを含む有限F
-3. **PARTIAL** — `xi_pool` 実役割を `UnresolvedInputQueue` として分離。`main.py`内部名とCLI表示はcompatibilityとして残存
+3. **PARTIAL** — `xi_pool` 実役割を `UnresolvedInputQueue` として分離。`main.py`内部名・保存キー・`/xipool`はcompatibilityとして残存。キュー・閾値の診断表示は分離済み
 4. **DONE** — unresolved-input queue length -> theta のlive結線を切断
 5. **DONE** — legacy feedback stateとcanonical Hを型・更新経路で分離
 6. **PARTIAL / OPT-IN AUTHORITY CUTOVER OPERATIONAL** — canonical authority、resolution policy、controller、gate、target planner、executor、mutation adapter、pipeline、durable session、review/plan/execute、`cli_v23_authority.py` によるlegacy leap authority無効化まで実装。**default `main.py` のauthority cutoverのみ未実施**

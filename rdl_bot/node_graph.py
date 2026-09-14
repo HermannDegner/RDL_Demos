@@ -85,12 +85,11 @@ class Node:
 
     def inertia(self) -> float:
         """
-        このノードが張る局所 M_B の慣性ノルム ‖M_B‖。
+        confidence・使用・承認から作るbot-local慣性指標。
 
-        Core §1.4 の入れ子ネットワーク性から、各ノードを下位 M_B として扱う。
-        confidence（Λ相当）を基礎に、実際に使われ・承認された分だけ強くなる。
-        使用と承認は上限を持たないので ‖M_B‖ は発散しうるが、それは
-        「絶対化した構造」に対応する正しい挙動（κ → 0 になる）。
+        Functions NN借用v0.2のκ・散逸モデルに使う代理量である。
+        ノードをCore M_Bそのものとは同一視せず、この式の有効性は
+        Botの用途・境界で検査する。使用・承認の累積に上限はない。
         """
         cfg = dynamics.CONFIG
         return self.confidence * (
@@ -101,14 +100,14 @@ class Node:
 
     def kappa(self, m_0: Optional[float] = None) -> float:
         """
-        自己修正可能性 κ(M_B) = exp(-‖M_B‖ / M_0)（NN借用 v0.1 §5）。
+        自己修正可能性 κ(M_B) = exp(-‖M_B‖ / M_0)（Functions NN借用 v0.2 §5の局所候補）。
 
         κ = 1  慣性が弱く、いくらでも更新できる
         κ → 0 慣性が強すぎて自分では修正できない（M_B 絶対性）
 
         κ→0 の領域は「間違っていても直せない」領域なので、
         自動更新ではなくユーザーの判断を仰ぐべき箇所になる
-        （LangGraph借用 v0.1 §6 の κ ゲート）。
+        （LangGraph借用 v0.2 §6 の κ ゲート）。
         """
         m_0 = dynamics.resolve(m_0, "kappa_m0")
         if m_0 <= 0:
@@ -117,15 +116,10 @@ class Node:
 
     def reinforce(self, rate: float, ceiling: Optional[float] = None):
         """
-        Core §6.1 の整合側の微小更新（dM_B/dt が V_B に沿って動く分）。
+        応答に使用されたノードのconfidenceを天井へ漸近させる局所方策。
 
-        このノードが実際に応答を担ったということは、M_B のその方向
-        （＝このノードが張る安定方向）が今回も通用したということ。
-        慣性の強さ Λ に相当する confidence を、天井へ向けて漸近的に上げる。
-
-        天井は 1.0 ではない。使われ続けるだけで最大確信に達してしまうと、
-        ユーザー承認(approval_count)による検証と区別がつかなくなる。
-        1.0 に到達できるのは明示的な同意(y)だけ。
+        使用されたことは正しさの証明ではない。明示承認と区別するため
+        既定天井を0.9とする。CoreのF/F′比較や未解消Hを計算する関数ではない。
         """
         ceiling = dynamics.resolve(ceiling, "alignment_ceiling")
         if rate <= 0 or self.confidence >= ceiling:
@@ -363,9 +357,8 @@ class NodeGraph:
 
     def m_b_norm(self) -> float:
         """
-        グラフ全体の整合慣性ノルム ‖M_B‖。
-        アクティブなノードの局所慣性を L2 ノルムで集約する。
-        関係保存則 ‖M_B‖·D[ξ] = 𝒦 の逆算（Core §4.2）に使う。
+        アクティブなノードのbot-local慣性をL2ノルムで集約する。
+        m_b_normというAPI名は互換用。Core ξや𝒦を推定する量ではない。
         """
         squares = sum(n.inertia() ** 2 for n in self.nodes.values() if n.status == "active")
         return math.sqrt(squares)
@@ -373,7 +366,7 @@ class NodeGraph:
     def dissipation_rates(self, gamma: Optional[float] = None,
                           cap: Optional[float] = None) -> Dict[str, float]:
         """
-        散逸行列 A の対角成分 a_k = γ·λ_k（NN借用 v0.1 §4）。
+        散逸行列 A の対角成分 a_k = γ·λ_k（Functions NN借用 v0.2 §4の局所候補）。
 
         「M_B の得意な方向ほど散逸が速い」＝ 慣性の強いノードほど熱を
         速く逃がし、弱いノードには熱が残る。固有分解を持たないため、
@@ -402,7 +395,7 @@ class NodeGraph:
         self.nodes = {nid: node for nid, node in self.nodes.items() if not (node.ttl <= 0 and node.confidence < 0.1)}
 
         if len(self.nodes) < initial_count:
-            print(f"  [M_Δ相] {initial_count - len(self.nodes)} 個のノードを退場させました。")
+            print(f"  [maintenance] {initial_count - len(self.nodes)} 個のノードを退場させました。")
 
     def update_relations(self, active_node_id: str, related_node_ids: List[str]):
         """
@@ -424,3 +417,4 @@ class NodeGraph:
         """
         # 複雑なロジックのため、現時点では実装しない。今後の課題。
         pass
+

@@ -399,13 +399,12 @@ class TestMetabolize(RespondTestCase):
 
 
 class TestAlignmentUpdate(RespondTestCase):
-    """Core §6.1: 整合領域でも dM_B/dt は V_B に沿って微小に動く。"""
+    """旧feedback/loadに基づくbot-local reinforcementの互換検証。"""
 
     def test_exact_match_reinforces_the_node(self):
         """
-        回帰テスト: 整合側に dM_B/dt がまったく存在せず（touch と usage_count
-        だけ）、H閾値を境に「何も起きない」から「全面再編」へ不連続に
-        飛んでいた（Core §6.3 整合と跳躍の同一性が成立しない）。
+        使用ノードのconfidence更新が働くことを検証する。
+        Coreの更新則を一意に実装したという主張ではない。
         """
         n = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
         g = self.graph(n)
@@ -421,8 +420,8 @@ class TestAlignmentUpdate(RespondTestCase):
 
     def test_reinforcement_vanishes_as_the_boundary_is_approached(self):
         """
-        H が θ_eff に近づくほど整合の更新は 0 に漸近する。
-        これにより整合と跳躍が同じ量 H に対する連続な応答になる。
+        旧feedback/loadがlegacy θ_effに近いほどconfidence増分が小さくなる。
+        authority入口ではこのslack方策を使わない。
         """
         calm = Node(inputs=["こんにちは"], response="やあ", confidence=0.5)
         self.respond("こんにちは", self.graph(calm), HState(theta=2.0))
@@ -517,17 +516,17 @@ class TestMetabolizeDissipation(RespondTestCase):
         self.assertGreater(h.H_post[weak.id], h.H_post[strong.id])
 
 
-class TestXiAffectsTheBoundary(RespondTestCase):
-    def test_xi_pool_is_wired_into_the_leap_threshold(self):
+class TestLegacyExplicitPressureCompatibility(RespondTestCase):
+    def test_explicit_pressure_can_reproduce_legacy_threshold_experiment(self):
         """
-        回帰テスト: ξプールは存在したが theta を一度も読まず、ξ が動態から
-        切り離されていた（Core §6.2 θ_eff = θ + g(ξ) が未実装）。
+        pressureを直接注入した旧実験の互換検証。
+        live CLIのキュー接続やCore ξを検証するものではない。
         """
         n = Node(inputs=["こんにちは"], response="やあ")
         g = self.graph(n)
         h = HState(theta=2.0, rng=random.Random(0))
         h.on_deny(n.id)
-        h.on_deny(n.id)   # H_post=2.0 — ξが無ければ跳躍しない
+        h.on_deny(n.id)   # legacy H_post=2.0 — 明示pressureが0なら跳躍しない
 
         without_xi = main._decide_leap(h, g, "exact", n, "こんにちは", pressure=0.0)
         self.assertIsNone(without_xi)
@@ -653,3 +652,4 @@ class TestInferDomain(RespondTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

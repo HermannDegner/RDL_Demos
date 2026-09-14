@@ -8,12 +8,12 @@ RDL個人M_B外部化AI - CLI ループ (Phase 0 + Phase A/B)
 
 コマンド（会話中）:
   /llm on|off|once            LLMモード切替
-  /h                          H状態を表示
+  /h                          legacy feedback/load状態を表示（Core Hとは別）
   /sfo                        AI_SFOプロファイルを表示
   /mbti <TYPE>                MBTIタイプでSFOプロファイルを再初期化
   /trust                      ドメイン別LLM信用度を表示
   /dyn                        動態係数とその帰結を表示
-  /xipool                     ξプールを表示
+  /xipool                     未処理入力キューを表示（互換コマンド名）
   /graph                      グラフ統計を表示
   /hot                        H高いノードを表示
   /quit                       終了
@@ -40,7 +40,7 @@ from typing import Optional
 import dynamics
 from dynamics import load_dynamics_config
 from node_graph import NodeGraph, Node, SEED_SOURCES
-from h_state import HState, xi_pressure
+from h_state import HState, xi_pressure, unresolved_input_pressure
 from llm_bridge import LLMBridge
 from sfo_profile import AI_SFO, DEFAULT_SFO_PRESET, create_sfo_profile_from_mbti
 from llm_trust import LLMTrust, LLMTrustConfig
@@ -121,15 +121,14 @@ def feedback_prompt(last_node_id: str, last_input: str, graph: NodeGraph, h: HSt
 
 def print_dynamics(graph: NodeGraph) -> None:
     """
-    動態係数と、その帰結を表示する。
+    Bot-local係数とlegacy互換モデルの帰結を表示する。
 
-    これらの係数は Core にも借用実装層にも決定則が無く、実際に動かした
-    感触でしか決まらない（NN借用 v0.1 の残課題そのもの）。
-    「γ=0.01」だけ見ても調整できないので、半減期のような
-    解釈できる形に直して並べる。
+    κ・散逸等はFunctions NN借用v0.2に関連する実装候補であり、
+    Core必須則ではない。係数は対象タスクで検証・調整する。
     """
     cfg = dynamics.CONFIG
-    print(f"  動態係数（{DYNAMICS_CONFIG_PATH} で上書き可）:")
+    print(f"  Bot-local動態係数（{DYNAMICS_CONFIG_PATH} で上書き可）:")
+    print("    legacy閾値モデルの表示です。canonical H / fixed θとは別です。")
     print(f"    {cfg.to_dict()}")
 
     print("  帰結:")
@@ -137,23 +136,24 @@ def print_dynamics(graph: NodeGraph) -> None:
     if cfg.theta_raise_on_leap > 1.0 and cfg.theta_max > cfg.theta_initial:
         n = math.ceil(math.log(cfg.theta_max / cfg.theta_initial)
                       / math.log(cfg.theta_raise_on_leap))
-        print(f"    θ: leap {n} 回で上限 {cfg.theta_max} に到達"
-              f"（M_Δ相ごとに ×{cfg.theta_relax} で初期値へ戻る）")
+        print(f"    legacy θ: leap {n} 回で上限 {cfg.theta_max} に到達"
+              f"（定期maintenanceで ×{cfg.theta_relax}、初期値を下限に緩和）")
 
-    # ξ圧が最大のときの θ_eff の範囲
+    # 非稼働の互換モデル。live CLIはキュー由来の閾値圧を0に固定する。
     lo = 1 - cfg.xi_drop_ratio - cfg.xi_jitter_ratio
     hi = 1 - cfg.xi_drop_ratio + cfg.xi_jitter_ratio
-    print(f"    ξ: プール {cfg.xi_saturation:.0f} 件でξ圧1.0 → "
-          f"θ_eff は θ×[{lo:.2f}, {hi:.2f}] に揺れる")
+    print("    live CLI: queue → threshold は切断済み (runtime pressure=0)")
+    print(f"    互換モデルのみ: 明示pressure=1なら legacy θ_eff/θ=[{lo:.2f}, {hi:.2f}]")
+    print(f"    queue診断の飽和件数={cfg.xi_saturation:.0f}（Core ξではない）")
 
     # κゲートが発動する慣性
     if 0 < cfg.kappa_hitl_threshold < 1:
         m_b = -cfg.kappa_m0 * math.log(cfg.kappa_hitl_threshold)
-        print(f"    κ: ‖M_B‖>{m_b:.1f} で自力修正不能とみなす"
+        print(f"    local κ: node_inertia>{m_b:.1f} で自力修正不能とみなす"
               f"（例: confidence 1.0 なら使用 {m_b / max(cfg.inertia_usage_weight, 1e-9):.0f} 回相当）")
 
     # 散逸の半減期
-    print("    散逸（H が半減するまでのターン数）:")
+    print("    散逸（legacy feedback/load が半減するまでのターン数）:")
     for label, conf, usage, appr in (
         ("同梱seed  ", 0.5, 0, 0),
         ("定着中    ", 0.9, 10, 0),
@@ -163,7 +163,7 @@ def print_dynamics(graph: NodeGraph) -> None:
         n.usage_count, n.approval_count = usage, appr
         rate = min(cfg.dissipation_cap, cfg.dissipation_gamma * n.inertia())
         half = math.log(2) / rate if rate > 0 else float("inf")
-        print(f"      {label} ‖M_B‖={n.inertia():5.2f}  a_k={rate:.3f}  半減期={half:.0f}ターン")
+        print(f"      {label} node_inertia={n.inertia():5.2f}  a_k={rate:.3f}  半減期={half:.0f}ターン")
 
     # 実グラフの現状
     if graph.nodes:
@@ -200,11 +200,11 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
     elif name == "/h":
         pressure = xi_pressure(xi_pool)
         print(f"  {h.summary(pressure)}")
-        # 関係保存則 ‖M_B‖·D[ξ] = 𝒦 の逆算（Core §4.2）。
-        # 𝒦 は直接観測できないので積として逆算するだけで、制御には使わない。
-        m_b = graph.m_b_norm()
-        print(f"  ‖M_B‖={m_b:.2f}  D[ξ]≈{pressure:.2f}  𝒦≈{m_b * pressure:.2f}"
-              f"   （𝒦は逆算値。制御には使わない）")
+        print("  legacy feedback/load診断です。Core Hとは別です。")
+        print(f"  local_graph_inertia={graph.m_b_norm():.2f}  "
+              f"unresolved_input_count={len(xi_pool)}  "
+              f"queue_coverage_pressure={unresolved_input_pressure(xi_pool):.2f}")
+        print("  queue診断は閾値に入力しません。Core ξ・𝒦の推定値ではありません。")
 
     elif name == "/sfo":
         print(f"  AI_SFOプロファイル: {sfo_profile.to_dict()}")
@@ -236,9 +236,9 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState, sfo_pr
 
     elif name == "/xipool":
         if not xi_pool:
-            print("  ξプールは空です。")
+            print("  未処理入力キューは空です。")
         else:
-            print("  ξプール内容:")
+            print("  未処理入力キュー内容:")
             for i, item in enumerate(xi_pool):
                 print(f"    {i+1}. {item}")
 
@@ -267,11 +267,15 @@ _turn_count = 0
 
 
 def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_state: HState, retire: bool = False):
-    """M_Δ相: 定期再編フェーズ (設計書 v0.3 §3.6)"""
-    print("  [M_Δ相] 代謝フェーズ開始...")
+    """Bot-local定期maintenance。canonical H/θによるM_Δ移行ではない。
 
-    # 0. 熱の散逸 dH_vec/dt の -A·H_vec 項（NN借用 v0.1 §4）。
-    # 慣性の強い（M_Bの得意な）方向ほど速く冷め、弱い方向に熱が残る。
+    毎ターンの減衰と、retire時の削除・キュー再評価を含む。
+    構造変更もあるため、read-only処理やcanonical再編と同一視しない。
+    """
+    print("  [maintenance] 代謝フェーズ開始...")
+
+    # 0. Functions NN借用v0.2の散逸候補を参考にした旧feedback/loadの減衰。
+    # canonical Hの散逸ではない。ノード局所慣性を代理量として使う。
     h_state.dissipate(graph.dissipation_rates())
 
     # 1. 低confidence・低使用頻度ノードのTTL減算と削除
@@ -291,7 +295,7 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
         # should_leap() の最大値を占め続け、実在ノードのleapを妨げる。
         stale = h_state.prune(graph.nodes.keys())
         if stale:
-            print(f"  [M_Δ相] 実体を失った {stale} 件のH蓄積を破棄しました。")
+            print(f"  [maintenance] 実体を失った {stale} 件のH蓄積を破棄しました。")
 
         # 1c. leapのたびに上がったθを初期値へ向けて緩める（設計書 §2 動的調整）
         h_state.relax_theta()
@@ -303,23 +307,23 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
         # 現状では node.relations を直接更新するロジックがないため、ここではスキップ
         # graph.update_relations(active_node_id, related_node_ids) # 呼び出し例
 
-        # 4. ξプールの再評価 (設計書 v0.3 §3.5)
+        # 4. 未処理入力キューの再評価 (設計書 v0.3 §3.5)
         if xi_pool:
-            print(f"  [M_Δ相] ξプール ({len(xi_pool)}件) を再評価中...")
+            print(f"  [maintenance] 未処理入力キュー ({len(xi_pool)}件) を再評価中...")
             re_evaluated_xi = []
             for item in xi_pool:
                 # ここで再度LLMに問い合わせるか、グラフ内検索を試みる
                 # 今回は簡易的に、グラフ内検索を試みる
                 node, match_type, _ = graph.search(item)
                 if node and match_type != "miss":
-                    print(f"    → ξプールからノード化成功: {item}")
+                    print(f"    → 未処理入力キューからノード化成功: {item}")
                     # 新規ノードとして追加（source: graph_composedとして扱う）
                     new_node = Node(inputs=[item], rdl_type=node.rdl_type, spatial_tag=node.spatial_tag, response=node.response, source="graph_composed", confidence=0.7)
                     graph.add(new_node)
                 else:
                     re_evaluated_xi.append(item) # まだノード化できないものはプールに残す
-            xi_pool[:] = re_evaluated_xi # ξプールを更新
-            if not xi_pool: print("  [M_Δ相] ξプールが空になりました。")
+            xi_pool[:] = re_evaluated_xi # 未処理入力キューを更新
+            if not xi_pool: print("  [maintenance] 未処理入力キューが空になりました。")
 
         # 5. SFOプロファイルの微調整・drift_factor 更新 (設計書 v0.3 §3.4 ドリフト機構)
         # 以前はhistory全体を毎回数え直しており、同じイベントが何度も
@@ -327,9 +331,9 @@ def metabolize(graph: NodeGraph, sfo_profile: AI_SFO, xi_pool: list[str], h_stat
         # 差分だけを集計するdrift_deltas()に置き換える。
         deltas = h_state.drift_deltas()
         sfo_profile.update_drift(deltas)
-        print(f"  [M_Δ相] SFOプロファイル drift_factor: {sfo_profile.drift_factor:.2f}")
+        print(f"  [maintenance] SFOプロファイル drift_factor: {sfo_profile.drift_factor:.2f}")
 
-    print("  [M_Δ相] 代謝フェーズ完了。")
+    print("  [maintenance] 代謝フェーズ完了。")
 
 
 def compose_from_graph(user_input: str, graph: NodeGraph) -> tuple[str, str]:
@@ -384,18 +388,12 @@ class LeapDecision:
 
 def _reinforce_along_v_b(node: Node, h: HState, pressure: float, base_rate: float) -> None:
     """
-    整合領域（H < θ_eff）における dM_B/dt を適用する（Core §6.1）。
+    旧feedback/loadの余裕とbot-local κでconfidence更新量を調整する。
 
-    更新量は二つの係数で絞る：
-      slack : θ_eff への近さ。H が 0 なら満額、θ_eff に近づくほど 0 に漸近し、
-              超えれば跳躍側（_correct_node）へ移る。これにより整合と跳躍が
-              「同じ量 H に対する連続な応答」になる（Core §6.3）
-      κ     : 自己修正可能性（NN借用 v0.1 §1 の dM_B/dt = κ·η·E·F^T ...）。
-              慣性が強くなるほど更新率が下がる＝過学習防止であり、
-              同時に「固まった構造は自分では動かない」という M_B 絶対性の表現
-
-    以前は整合側の dM_B/dt がそもそも存在せず（touch と usage_count だけ）、
-    H閾値を境に「何も起きない」から「全面再編」へ不連続に飛んでいた。
+    hはLegacyFeedbackLoadStateでありcanonical Hではない。
+    Functions NN借用v0.2のκによる更新率調整に関連する局所仮設だが、
+    E×RIB_Bの外積計算やCore更新則そのものを実装してはいない。
+    authority入口ではH/θ依存のslackを使わない別helperに置換される。
     """
     theta_eff = h.theta_eff(pressure)
     if theta_eff <= 0:
@@ -495,7 +493,7 @@ def _learn_new_node(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge
                     xi_pool: list[str], reason: str) -> Optional[tuple[str, str]]:
     """
     未知入力をLLMでノード化する。成功なら (応答, ノードID)、
-    ノード化できなければξプールへ退避して生応答を返す。
+    ノード化できなければ未処理入力キューへ退避して生応答を返す。
     どちらも駄目なら None（呼び出し側でグラフ内合成へ）。
     """
     if not (llm.mode in ("on", "on-once") and llm.available()):
@@ -508,9 +506,9 @@ def _learn_new_node(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge
         graph.save()
         return new_node.response or f"[新規学習({reason}): {new_node.rdl_type}]", new_node.id
 
-    # ノード化できなかった入力はξプールへ（後のM_Δ相で再評価される）
+    # ノード化できなかった入力は未処理入力キューへ（定期maintenanceで再評価される）
     xi_pool.append(user_input)
-    print("  [LLMノード化失敗 → ξプールに格納しました]")
+    print("  [LLMノード化失敗 → 未処理入力キューに格納しました]")
     h.on_llm_call()
     raw = llm.ask(user_input)
     if raw:
@@ -551,7 +549,7 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
     """
     node, match_type, nearest = graph.search(user_input)
 
-    # ξ圧は跳躍境界を揺らし(θ_eff)、整合側の更新量にも効く。1ターン1回だけ評価する。
+    # 互換hookは0を返す。未処理入力件数はlive閾値・更新量を変えない。
     pressure = xi_pressure(xi_pool)
 
     if match_type == "exact":
@@ -596,7 +594,7 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge, sfo_pr
 
     if decision is not None:
         if decision.scope == "phantom":
-            # 実体の無いID（__llm__ / __crisis__、M_Δ相で退場したノード）に
+            # 実体の無いID（__llm__ / __crisis__、maintenanceで退場したノード）に
             # Hが溜まった状態。修正対象が無いのでleapで消化できず、放置すると
             # 毎ターン should_leap() の最大値を占め続けて実ノードのleapを妨げる。
             h.forget(decision.target_node_id)
@@ -716,9 +714,9 @@ def phase0_seed(graph: NodeGraph, llm: LLMBridge):
 
 def save_session_state(path: str, h: HState, sfo_profile: AI_SFO, xi_pool: list[str], llm_mode: str, turn_count: int):
     """
-    H・SFO・ξプール・LLMモード・ターン数を永続化する。
+    H・SFO・未処理入力キュー・LLMモード・ターン数を永続化する。
     以前はgraph.jsonしか保存されず、再起動のたびにユーザーとの
-    齟齬や適応過程（H, drift, ξプール）が初期化されていた。
+    齟齬や適応過程（H, drift, 未処理入力キュー）が初期化されていた。
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = {
@@ -767,7 +765,7 @@ def main():
         # 指紋の文字列だけを差し替えており、実際の得意操作・苦手操作は
         # dataclassの既定値のままでプリセットと食い違っていた。
         sfo_profile = create_sfo_profile_from_mbti(DEFAULT_SFO_PRESET)
-        xi_pool = [] # ξプール (設計書 v0.3 §3.5)
+        xi_pool = [] # 未処理入力キュー (設計書 v0.3 §3.5)
         saved_llm_mode = None
         _turn_count = 0
 
@@ -833,7 +831,7 @@ def main():
         # 毎ターン簡易フィードバック
         feedback_prompt(last_node_id, last_input, graph, h)
 
-        # M_Δ相: 代謝（毎ターン減衰、50ターンごとに死滅退場＋保存）
+        # 定期maintenance（毎ターン減衰、50ターンごとに退場・キュー再評価・保存）
         _turn_count += 1
         retire = (_turn_count % 50 == 0)
         metabolize(graph, sfo_profile, xi_pool, h, retire=retire)
