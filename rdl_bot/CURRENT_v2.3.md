@@ -19,10 +19,12 @@ RIB_B(t+Δ)
 F' = interp(M_B(t), RIB_B(t+Δ))
    ↓
 E = Δ(F, F')
-   ↓ ResolutionAssessment
-unresolved only
-   ↓
+   ↓ resolution policy / explicit review
+resolved / pending / unresolved
+   ↓ unresolved only
 H
+   ↓ fixed θ
+reconstruction eligibility
 ```
 
 live graphがtからt+Δの間に強化・学習・修正されても、それ自体はcanonical Eを妨げない。`runtime_v23.FrozenGraphEvaluator` がt時点の有限graph-side evaluatorをdeep copyし、後時点のsectionをそこへreplayする。
@@ -43,9 +45,11 @@ coverage / missing / unknown / rejection != H
 coverage / missing / unknown / rejection != ξ
 noise / random jitter != ξ
 all E != H
+nonzero E != unresolved by magnitude alone
 runtime unresolved-input queue length does not change theta
 legacy miss / deny / silence do not mutate canonical H
 bare bool is not a sufficient unresolved classification
+canonical reconstruction eligibility != node target selection
 ```
 
 ## Runtime migration state
@@ -73,9 +77,9 @@ unresolved input queue
 
 `h_state.unresolved_input_pressure()` はキュー長の診断量として残るが、live compatibility hook `xi_pressure()` は0を返す。実役割名は `local_state.UnresolvedInputQueue`。`main.py` 内部の `xi_pool` 変数名と `/xipool` 表示はcompatibility表面としてまだ残る。
 
-## Canonical unresolved classification
+## Canonical resolution policy
 
-`resolution_v23.py` の `ResolutionAssessment` が、canonical mismatchをresolved / unresolvedのどちらとして扱うかを記録するapplication boundary。
+`resolution_v23.py` の `ResolutionAssessment` が、canonical mismatchをresolved / unresolvedのどちらとして扱うかを記録するprovenance-bearing boundaryである。
 
 ```text
 ResolutionAssessment(
@@ -88,15 +92,43 @@ ResolutionAssessment(
 
 `reason` と `assessor` は必須。`CanonicalLeapAuthority` は裸のboolを受け取らない。また `from_deny / from_miss / from_silence` のようなshortcut constructorは意図的に持たない。
 
-legacy feedback eventは上位評価のevidenceになり得るが、それ自体をcanonical unresolved判定へ変換しない。
-
-## Canonical reconstruction authority candidate
-
-`authority_v23.py` の `CanonicalLeapAuthority` は、まだlive CLIのaction authorityではない。
+`assessment_policy_v23.py` は実conversation向けの保守的な形成規則を固定する。
 
 ```text
-same frozen M_B(t)による canonical E
-        ↓ ResolutionAssessment
+canonical E magnitude == 0
+    -> resolved automatically
+
+canonical E magnitude > 0
+    -> pending
+    -> Hには入れない
+
+pending
+    -> explicit reason + assessor + evidence
+    -> unresolvedへ昇格可能
+```
+
+したがって、非ゼロEの大きさだけでunresolvedにはしない。legacy feedback eventは上位評価のevidenceになり得るが、それ自体をcanonical unresolved判定へ変換しない。
+
+`canonical_runtime_v23.py` の `CanonicalRuntimeController` はこの形成規則を実turn pairへ接続する。
+
+```text
+shadow turn pair
+  ↓ earlier frozen-model replay
+canonical E
+  ↓ conservative classify
+zero      -> resolved-observed -> authority（H増分なし）
+non-zero  -> pending-review    -> authorityへ入れない
+  ↓ explicit review only
+unresolved assessment
+  ↓
+canonical H
+```
+
+## Canonical reconstruction authority and action gate
+
+`authority_v23.py` の `CanonicalLeapAuthority` はcanonical H + fixed θで再編資格を判定する。まだlive CLIのaction authorityではない。
+
+```text
 unresolved canonical E only
         ↓
 UnresolvedMismatchState
@@ -105,6 +137,21 @@ should_reconstruct
 ```
 
 このauthorityはAPI構造上、legacy miss/deny/silence、unresolved queue length、local pressure/uncertainty、Core ξ scalarを受け取らない。
+
+`action_gate_v23.py` の `CanonicalActionGate` は、`should_reconstruct` が成立したauthority observationだけを `ReconstructionRequest` へ変換する。
+
+重要なのは、request生成時点で**target nodeを決めない**ことである。
+
+```text
+canonical H >= fixed θ
+      ↓
+ReconstructionRequest
+  target_ref = None
+      ↓
+separate canonical target planner / executor（未実装）
+```
+
+canonical再編資格と「どのnodeを修正するか」は別問題であり、後者をlegacy hot-nodeから流用しない。`CanonicalActionGate` はlegacy state / hot-nodeを入力に取らない。
 
 `parallel_v23.py` の `CanonicalParallelObserver` は、legacy `should_leap(0.0)` とcandidate `should_reconstruct` を同じturn pairについてaction非介入で記録する。legacy loadを消費せず、candidate判定も修正・隔離・学習を発火させない。
 
@@ -117,7 +164,7 @@ live model changed, same B -> frozen earlier modelでcanonical比較継続
 B changed -> canonical comparison unavailable
 ```
 
-Step 6の残件は、実conversation上での `ResolutionAssessment` 形成規則と、十分な並走差分観測を経たlive action cutoverである。
+Step 6の残件は、pending reviewを扱うcanonical target planner / executorと、それを経たlive action cutoverである。
 
 ## Migration order
 
@@ -126,7 +173,7 @@ Step 6の残件は、実conversation上での `ResolutionAssessment` 形成規�
 3. **PARTIAL** — `xi_pool` の実役割を `UnresolvedInputQueue` として分離。`main.py`内部名とCLI表示はcompatibilityとして残存
 4. **DONE** — unresolved-input queue length -> theta のlive結線を切断
 5. **DONE** — legacy feedback eventとcanonical Hを型・更新経路の両方で分離
-6. **PARTIAL** — canonical H + fixed θ authority、`ResolutionAssessment`、legacy/canonical並走observerを実装。live action cutoverは未実施
+6. **PARTIAL** — canonical H + fixed θ authority、保守的resolution policy、live controller、targetless action gate、legacy/canonical並走observerまで実装。canonical target planner / executorとlive cutoverは未実施
 7. **NEXT AFTER CUTOVER** — 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
 ## Tests
@@ -142,11 +189,16 @@ v2.3テストは少なくとも次を固定する。
 - later RIB_Bをearlier frozen evaluatorへreplayしてF'を形成
 - B変更時はEを作らない
 - model fingerprintはrouting-relevant state変更を検出する
+- zero Eは自動resolvedにできる
+- nonzero Eは大きさだけではunresolvedにせずpendingに留める
+- pendingはexplicit provenanceなしではcanonical Hへ入らない
 - resolved mismatchはHへ入らない
 - legacy feedback eventはcanonical Hを変更しない
 - queue diagnosticはfixed θを変更しない
 - unresolved分類はprovenance付き `ResolutionAssessment` を要求
 - bare boolや `deny -> unresolved` shortcutを拒否
+- reconstruction request生成時にlegacy hot-nodeを要求しない
+- canonical requestはtargetlessで始まり、再編資格とtarget選択を分離する
 - legacy/canonicalの判定差をaction非介入で記録できる
 
 ## Formation history
