@@ -1,5 +1,5 @@
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from runtime_v23 import V23ConversationShadow, frozen_graph_model_ref, respond_with_shadow
 
@@ -11,13 +11,16 @@ class DummyNode:
     status: str = "active"
     phase: str = "M_act"
     usage_count: int = 1
+    inputs: list[str] = field(default_factory=list)
+    relations: list[str] = field(default_factory=list)
+    source: str = "manual"
 
 
 class DummyGraph:
     def __init__(self):
         self.nodes = {
-            "known": DummyNode("known", confidence=0.8),
-            "near": DummyNode("near", confidence=0.4),
+            "known": DummyNode("known", confidence=0.8, inputs=["known"]),
+            "near": DummyNode("near", confidence=0.4, inputs=["near"]),
         }
 
     def search(self, text):
@@ -76,7 +79,7 @@ class ShadowRuntimeTests(unittest.TestCase):
         self.assertNotEqual(turn.input_state, turn.input_section)
         self.assertEqual(turn.input_section.payload["text"], "known")
 
-    def test_same_frozen_graph_allows_input_comparison(self):
+    def test_same_frozen_graph_allows_strict_input_comparison(self):
         graph = DummyGraph()
         shadow = V23ConversationShadow()
         first = shadow.capture_input("known", graph)
@@ -90,23 +93,56 @@ class ShadowRuntimeTests(unittest.TestCase):
         self.assertIn("exact", mismatch.reasons)
         self.assertIn("miss", mismatch.reasons)
 
-    def test_graph_change_prevents_false_same_model_E(self):
+    def test_live_graph_change_breaks_strict_comparison_but_not_frozen_replay(self):
         graph = DummyGraph()
         shadow = V23ConversationShadow()
         first = shadow.capture_input("known", graph)
         shadow.capture_response(first, "a", "known")
 
         graph.nodes["known"].confidence = 0.2
+        graph.nodes["near"].confidence = 0.1
         second = shadow.capture_input("unknown", graph)
         shadow.capture_response(second, "b", "__none__")
 
         self.assertNotEqual(shadow.turns[0].model_ref, shadow.turns[1].model_ref)
         self.assertIsNone(shadow.compare_inputs(1, 2))
 
+        mismatch = shadow.replay_later_under_earlier_model(1, 2)
+        self.assertIsNotNone(mismatch)
+        self.assertGreater(mismatch.magnitude, 0.0)
+        # F' was formed with the earlier snapshot, where nearest confidence was 0.4.
+        self.assertAlmostEqual(mismatch.values["candidate_confidence"], 0.4)
+
+    def test_frozen_evaluator_does_not_follow_live_mutation(self):
+        graph = DummyGraph()
+        shadow = V23ConversationShadow()
+        first = shadow.capture_input("known", graph)
+        graph.nodes["known"].confidence = 0.1
+
+        replayed = first.model_evaluator.interpret(first.input_section)
+
+        self.assertAlmostEqual(replayed.values["candidate_confidence"], 0.8)
+        self.assertAlmostEqual(first.input_state.values["candidate_confidence"], 0.8)
+
+    def test_boundary_change_prevents_replay_E(self):
+        graph = DummyGraph()
+        shadow = V23ConversationShadow(boundary_id="B:one")
+        shadow.capture_input("known", graph)
+        shadow.boundary_id = "B:two"
+        shadow.capture_input("unknown", graph)
+
+        self.assertIsNone(shadow.replay_later_under_earlier_model(1, 2))
+
     def test_model_fingerprint_is_deterministic_for_same_finite_state(self):
         first = DummyGraph()
         second = DummyGraph()
         self.assertEqual(frozen_graph_model_ref(first), frozen_graph_model_ref(second))
+
+    def test_model_fingerprint_changes_when_routing_inputs_change(self):
+        first = DummyGraph()
+        second = DummyGraph()
+        second.nodes["known"].inputs = ["different"]
+        self.assertNotEqual(frozen_graph_model_ref(first), frozen_graph_model_ref(second))
 
 
 if __name__ == "__main__":
