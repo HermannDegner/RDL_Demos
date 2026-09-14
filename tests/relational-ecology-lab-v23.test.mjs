@@ -28,6 +28,10 @@ function interpreter(section) {
   };
 }
 
+function near(actual, expected, epsilon = 1e-12) {
+  assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} != ${expected}`);
+}
+
 test('raw ecology data and RIB_B section remain distinct', () => {
   const raw = { resource: 0.2, danger: 0.1, motion: 0.7 };
   const section = acquireInteractionSection({
@@ -55,8 +59,10 @@ test("same pre-update model forms F, F' and canonical E", () => {
   const later = interpretSection(laterSection, { modelRef: 'M_B:pre-update:1', interpreter });
   const mismatch = compareInterpretations(current, later);
 
-  assert.deepEqual(mismatch.values, { resource: 0.4, danger: 0.15, motion: 0.29999999999999993 });
-  assert.equal(mismatch.magnitude, 0.4);
+  near(mismatch.values.resource, 0.4);
+  near(mismatch.values.danger, 0.15);
+  near(mismatch.values.motion, 0.3);
+  near(mismatch.magnitude, 0.4);
   assert.deepEqual(mismatch.reasons, ['danger', 'motion', 'resource']);
 });
 
@@ -99,7 +105,7 @@ test('unresolved canonical mismatch can drive fixed theta', () => {
   );
 
   state.observe(compareInterpretations(current, later), { unresolved: true });
-  assert.equal(state.magnitude, 0.4);
+  near(state.magnitude, 0.4);
   assert.equal(state.shouldReconstruct, true);
   assert.equal(state.theta, 0.3);
 });
