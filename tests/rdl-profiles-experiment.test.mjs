@@ -14,9 +14,9 @@ import {
   runParameterSearch,
 } from "../rdl_system/experiment/parameter_search.mjs";
 
-test("profiles は rdl_system/core の外で係数を束ねる", () => {
+test("profiles は rdl_system/core の外でデモ係数を束ねる", () => {
   const profile = mergeProfile(livingFieldProfile, {
-    node: { xiDecay: 0.9 },
+    node: { adaptationPressureDecay: 0.9 },
     leap: { cooldownTicks: 12 },
   });
 
@@ -26,12 +26,12 @@ test("profiles は rdl_system/core の外で係数を束ねる", () => {
     profile,
   });
 
-  assert.equal(node.xiDecay, 0.9);
+  assert.equal(node.adaptationPressureDecay, 0.9);
   assert.equal(node.leapEngine.cooldownTicks, 12);
   assert.equal(node.boundary.thetaBase, livingFieldProfile.boundary.thetaBase);
 });
 
-test("botProfile は turn-based 境界向けの保守的な係数を持つ", () => {
+test("botProfile は turn-based 境界向けの保守的なデモ係数を持つ", () => {
   const node = createProfiledNode({
     id: "bot-node",
     dimensions: ["concept"],
@@ -39,36 +39,36 @@ test("botProfile は turn-based 境界向けの保守的な係数を持つ", () 
   });
 
   assert.equal(node.boundary.thetaBase, 2);
-  assert.equal(node.xiMax, 1);
+  assert.equal(node.adaptationPressureMax, 1);
   assert.equal(node.leapEngine.cooldownTicks, 4);
 });
 
-test("durability metrics は ξ飽和と跳躍率を要約する", () => {
+test("durability metrics はデモ固有pressure飽和と跳躍率を要約する", () => {
   const metrics = summarizeSnapshots([
-    { xi: 0.1, H: { a: 0.2 }, reliability: { a: 0.9 }, leapCount: 0 },
-    { xi: 1.2, H: { a: 0.001 }, reliability: { a: 0.1 }, leapCount: 2 },
-  ], { xiMax: 1.2 });
+    { adaptationPressure: 0.1, H: { a: 0.2 }, reliability: { a: 0.9 }, leapCount: 0 },
+    { adaptationPressure: 1.2, H: { a: 0.001 }, reliability: { a: 0.1 }, leapCount: 2 },
+  ], { adaptationPressureMax: 1.2 });
 
   assert.equal(metrics.ticks, 2);
   assert.equal(metrics.leapRate, 1);
-  assert.equal(metrics.xiSaturationRate, 0.5);
+  assert.equal(metrics.adaptationPressureSaturationRate, 0.5);
   assert.equal(metrics.hSilenceRate, 0.5);
   assert.equal(metrics.reliabilityCollapseRate, 0.5);
 });
 
-test("parameter search はグリッドを展開して高スコア順に返す", () => {
+test("parameter search はデモ固有係数を展開して高スコア順に返す", () => {
   assert.deepEqual(expandParameterGrid({
-    xiDecay: [0.8, 0.9],
+    adaptationPressureDecay: [0.8, 0.9],
     cooldownTicks: [1, 2],
   }), [
-    { xiDecay: 0.8, cooldownTicks: 1 },
-    { xiDecay: 0.8, cooldownTicks: 2 },
-    { xiDecay: 0.9, cooldownTicks: 1 },
-    { xiDecay: 0.9, cooldownTicks: 2 },
+    { adaptationPressureDecay: 0.8, cooldownTicks: 1 },
+    { adaptationPressureDecay: 0.8, cooldownTicks: 2 },
+    { adaptationPressureDecay: 0.9, cooldownTicks: 1 },
+    { adaptationPressureDecay: 0.9, cooldownTicks: 2 },
   ]);
 
   const search = runParameterSearch({
-    parameterGrid: { xiGain: [0.01, 0.5] },
+    parameterGrid: { adaptationPressureGain: [0.01, 0.5] },
     seeds: [1],
     ticks: 12,
     makeSimulation: ({ params }) => {
@@ -76,12 +76,15 @@ test("parameter search はグリッドを展開して高スコア順に返す", 
       const node = new MBNode({
         id: "search-node",
         boundary,
-        xiGain: params.xiGain,
+        reliability: 1,
+        alignRate: 0,
+        adaptationPressureGain: params.adaptationPressureGain,
       });
       return {
-        step: (tick) => node.update({
-          actualF: { x: 0.4 },
-          predictedF: { x: 0 },
+        step: (tick) => node.compareSections({
+          currentSection: boundary.section({ x: 0 }, { id: `a-${tick}` }),
+          laterSection: boundary.section({ x: 0.4 }, { id: `b-${tick}` }),
+          unresolved: false,
           tick,
         }),
         snapshot: () => node.snapshot(),
@@ -90,5 +93,5 @@ test("parameter search はグリッドを展開して高スコア順に返す", 
   });
 
   assert.equal(search.results.length, 2);
-  assert.equal(search.best.params.xiGain, 0.01);
+  assert.equal(search.best.params.adaptationPressureGain, 0.01);
 });
