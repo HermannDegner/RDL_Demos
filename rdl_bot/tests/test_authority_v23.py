@@ -81,11 +81,30 @@ class CanonicalAuthorityTests(unittest.TestCase):
         self.assertEqual(observation.theta, 0.5)
         self.assertEqual(observation.assessment.assessor, "test-harness")
 
-    def test_model_change_produces_no_E_and_no_H_update(self):
+    def test_live_model_change_still_allows_fprime_under_earlier_snapshot(self):
         graph = _Graph()
         shadow = V23ConversationShadow()
         shadow.capture_input("known", graph)
-        graph.node.confidence = 0.4  # changes the frozen evaluator fingerprint
+        first_ref = shadow.turns[0].model_ref
+        graph.node.confidence = 0.4
+        shadow.capture_input("unknown", graph)
+        second_ref = shadow.turns[1].model_ref
+        authority = CanonicalLeapAuthority(theta=0.5)
+
+        observation = authority.observe_turn_pair(
+            shadow, 1, 2, assessment=unresolved_assessment()
+        )
+
+        self.assertNotEqual(first_ref, second_ref)
+        self.assertEqual(observation.status, "observed-unresolved")
+        self.assertIsNotNone(observation.mismatch)
+        self.assertTrue(observation.should_reconstruct)
+
+    def test_boundary_change_produces_no_E_and_no_H_update(self):
+        graph = _Graph()
+        shadow = V23ConversationShadow(boundary_id="B:one")
+        shadow.capture_input("known", graph)
+        shadow.boundary_id = "B:two"
         shadow.capture_input("unknown", graph)
         authority = CanonicalLeapAuthority(theta=0.5)
 
@@ -93,7 +112,7 @@ class CanonicalAuthorityTests(unittest.TestCase):
             shadow, 1, 2, assessment=unresolved_assessment()
         )
 
-        self.assertEqual(observation.status, "model-changed-no-E")
+        self.assertEqual(observation.status, "boundary-changed-no-E")
         self.assertIsNone(observation.mismatch)
         self.assertEqual(authority.h_magnitude, 0.0)
         self.assertFalse(authority.should_reconstruct)
