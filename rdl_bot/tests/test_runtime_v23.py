@@ -20,12 +20,15 @@ class DummyGraph:
     def __init__(self):
         self.nodes = {
             "known": DummyNode("known", confidence=0.8, inputs=["known"]),
+            "other": DummyNode("other", confidence=0.8, inputs=["other"]),
             "near": DummyNode("near", confidence=0.4, inputs=["near"]),
         }
 
     def search(self, text):
         if text == "known":
             return self.nodes["known"], "exact", self.nodes["known"]
+        if text == "other":
+            return self.nodes["other"], "exact", self.nodes["other"]
         if text.startswith("kn"):
             return self.nodes["known"], "partial", self.nodes["known"]
         return None, "miss", self.nodes["near"]
@@ -66,6 +69,7 @@ class ShadowRuntimeTests(unittest.TestCase):
         self.assertEqual(turn.input_section.role, "user-input")
         self.assertEqual(turn.input_section.payload["text"], "known")
         self.assertEqual(turn.input_state.values["exact"], 1.0)
+        self.assertEqual(turn.input_state.values["route:known"], 1.0)
         self.assertEqual(turn.response_section.role, "bot-response")
         self.assertEqual(turn.response_section.payload["text"], "answer")
         self.assertEqual(turn.response_node_id, "known")
@@ -92,6 +96,22 @@ class ShadowRuntimeTests(unittest.TestCase):
         self.assertGreater(mismatch.magnitude, 0.0)
         self.assertIn("exact", mismatch.reasons)
         self.assertIn("miss", mismatch.reasons)
+
+    def test_same_match_class_and_confidence_still_preserve_route_change(self):
+        graph = DummyGraph()
+        shadow = V23ConversationShadow()
+        shadow.capture_input("known", graph)
+        shadow.capture_input("other", graph)
+
+        mismatch = shadow.replay_later_under_earlier_model(1, 2)
+
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch.values["exact"], 0.0)
+        self.assertEqual(mismatch.values["candidate_confidence"], 0.0)
+        self.assertEqual(mismatch.values["route:known"], 1.0)
+        self.assertEqual(mismatch.values["route:other"], 1.0)
+        self.assertIn("route:known", mismatch.reasons)
+        self.assertIn("route:other", mismatch.reasons)
 
     def test_live_graph_change_breaks_strict_comparison_but_not_frozen_replay(self):
         graph = DummyGraph()
