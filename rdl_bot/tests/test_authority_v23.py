@@ -5,6 +5,7 @@ import unittest
 from authority_v23 import CanonicalLeapAuthority
 from h_state import HState, unresolved_input_pressure
 from local_state import UnresolvedInputQueue
+from resolution_v23 import ResolutionAssessment
 from runtime_v23 import V23ConversationShadow
 
 
@@ -28,6 +29,22 @@ class _Graph:
         return None, "miss", self.node
 
 
+def resolved_assessment():
+    return ResolutionAssessment.resolved(
+        reason="later state is accounted for by the same finite routing model",
+        assessor="test-harness",
+        evidence_refs=("turn-1", "turn-2"),
+    )
+
+
+def unresolved_assessment():
+    return ResolutionAssessment.unresolved_case(
+        reason="canonical mismatch remains unexplained under the comparison contract",
+        assessor="test-harness",
+        evidence_refs=("turn-1", "turn-2"),
+    )
+
+
 class CanonicalAuthorityTests(unittest.TestCase):
     def shadow_pair(self):
         graph = _Graph()
@@ -40,23 +57,29 @@ class CanonicalAuthorityTests(unittest.TestCase):
         _, shadow = self.shadow_pair()
         authority = CanonicalLeapAuthority(theta=0.5)
 
-        observation = authority.observe_turn_pair(shadow, 1, 2, unresolved=False)
+        observation = authority.observe_turn_pair(
+            shadow, 1, 2, assessment=resolved_assessment()
+        )
 
         self.assertEqual(observation.status, "observed-resolved")
         self.assertEqual(authority.h_magnitude, 0.0)
         self.assertFalse(authority.should_reconstruct)
         self.assertEqual(authority.theta, 0.5)
+        self.assertFalse(observation.unresolved)
 
     def test_unresolved_canonical_mismatch_can_drive_fixed_theta(self):
         _, shadow = self.shadow_pair()
         authority = CanonicalLeapAuthority(theta=0.5)
 
-        observation = authority.observe_turn_pair(shadow, 1, 2, unresolved=True)
+        observation = authority.observe_turn_pair(
+            shadow, 1, 2, assessment=unresolved_assessment()
+        )
 
         self.assertEqual(observation.status, "observed-unresolved")
         self.assertGreater(authority.h_magnitude, 0.0)
         self.assertTrue(authority.should_reconstruct)
         self.assertEqual(observation.theta, 0.5)
+        self.assertEqual(observation.assessment.assessor, "test-harness")
 
     def test_model_change_produces_no_E_and_no_H_update(self):
         graph = _Graph()
@@ -66,7 +89,9 @@ class CanonicalAuthorityTests(unittest.TestCase):
         shadow.capture_input("unknown", graph)
         authority = CanonicalLeapAuthority(theta=0.5)
 
-        observation = authority.observe_turn_pair(shadow, 1, 2, unresolved=True)
+        observation = authority.observe_turn_pair(
+            shadow, 1, 2, assessment=unresolved_assessment()
+        )
 
         self.assertEqual(observation.status, "model-changed-no-E")
         self.assertIsNone(observation.mismatch)
@@ -103,7 +128,29 @@ class CanonicalAuthorityTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             CanonicalLeapAuthority(theta=0.5, pressure=1.0)
         with self.assertRaises(TypeError):
-            authority.observe_turn_pair(None, 1, 2, unresolved=True, deny=3)
+            authority.observe_turn_pair(
+                None, 1, 2, assessment=resolved_assessment(), deny=3
+            )
+
+    def test_bare_unresolved_bool_is_rejected(self):
+        _, shadow = self.shadow_pair()
+        authority = CanonicalLeapAuthority(theta=0.5)
+
+        with self.assertRaises(TypeError):
+            authority.observe_turn_pair(shadow, 1, 2, assessment=True)
+
+
+class ResolutionAssessmentTests(unittest.TestCase):
+    def test_reason_and_assessor_are_required(self):
+        with self.assertRaises(ValueError):
+            ResolutionAssessment(unresolved=True, reason="", assessor="test")
+        with self.assertRaises(ValueError):
+            ResolutionAssessment(unresolved=True, reason="reason", assessor="")
+
+    def test_no_legacy_feedback_constructor_exists(self):
+        self.assertFalse(hasattr(ResolutionAssessment, "from_deny"))
+        self.assertFalse(hasattr(ResolutionAssessment, "from_miss"))
+        self.assertFalse(hasattr(ResolutionAssessment, "from_silence"))
 
 
 if __name__ == "__main__":
