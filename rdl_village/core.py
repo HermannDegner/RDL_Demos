@@ -1,9 +1,19 @@
-"""RDL中核動態：B・H_vec・ξ・θ・Leap・相状態。
+"""Village simulation dynamics with Core v2.3 role separation.
 
-参照:
-  RDL_NPC行動決定システム §3（主要変数）, §6（ξ探索と跳躍の区別）
-  RDL_簡易村シミュレーター §12（H_vec・ξ・Leap）
-  RDL_Demos/rdl_system/core（H更新式・θ算出・leap判定）
+The village predates the current RIB/RIB_B model.  Several useful simulation
+states were historically named with Core symbols.  Their behaviour is retained
+for regression stability, but the canonical implementation names now describe
+their actual local roles:
+
+- ``LocalLoadVector``: demo-local multi-channel load, not Core H by identity;
+- ``BasalExplorationLoad``: boredom/exploration motivation, not Core H;
+- ``ExplorationState``: search pressure + unresolved outcome queue, not Core xi;
+- ``ActionBoundary``: village-local action policy boundary, not the complete
+  semantics of Core B.
+
+Historical names ``HVec``, ``BasalHeat``, ``XiPool`` and ``Boundary`` remain as
+compatibility aliases while callers are migrated.  Canonical Core v2.3
+comparison is implemented separately in ``v23_boundary.py``.
 """
 
 import math
@@ -13,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
-H_CHANNELS = (
+LOAD_CHANNELS = (
     "body",
     "resource",
     "motion",
@@ -23,8 +33,10 @@ H_CHANNELS = (
     "environment",
     "boredom",
 )
+H_CHANNELS = LOAD_CHANNELS  # compatibility public name
 
-# 誤差から積み上げるのではなく、外から直接与えるチャネル。
+# Channels supplied directly by the village motivation model rather than from
+# canonical Delta(F, F').
 DIRECT_CHANNELS = ("boredom",)
 
 
@@ -59,21 +71,24 @@ def point_to_segment_distance(point, start, end):
     return distance(point, (start[0] + t * dx, start[1] + t * dy))
 
 
-class HVec:
-    """破断位置を保持するHベクトル。
+class LocalLoadVector:
+    """Village-local multi-channel load history.
 
-    単一のストレス値へ圧縮しない（村§19-9）。
-    観測されなかったチャネルも減衰させ、古い熱が残り続けないようにする。
+    This class preserves the historical behaviour of ``HVec``.  Its channels
+    mix prediction residuals and direct motivations, so the whole vector must
+    not be identified with Core H.  Migration code should use
+    ``VillageUnresolvedH`` in ``v23_boundary.py`` when it needs the canonical
+    unresolved-mismatch role.
     """
 
-    def __init__(self, coeffs, channels=H_CHANNELS, direct=DIRECT_CHANNELS):
+    def __init__(self, coeffs, channels=LOAD_CHANNELS, direct=DIRECT_CHANNELS):
         self.coeffs = coeffs
         self.values = {channel: 0.0 for channel in channels}
         self.direct = set(direct)
         self.history = deque(maxlen=48)
 
     def set_direct(self, channel, value):
-        """予測差の蓄積ではなく、自発生成された仮想熱をそのまま置く。"""
+        """Place a direct village-local motivation/load value."""
         self.values[channel] = clamp(value, 0.0, self.coeffs.ceiling)
 
     def observe(self, errors):
@@ -93,18 +108,19 @@ class HVec:
         return channel, self.values[channel]
 
     def retain_after_leap(self, channel=None):
-        """Leap後もHを完全消去しない（村§12）。再編前の履歴を一部残す。"""
         residual = self.coeffs.residual_after_leap
         targets = [channel] if channel else list(self.values)
         for key in targets:
-            # 直接チャネルは毎tick外から書き直されるので、ここで減らしても消える。
-            # 放出は熱源側（BasalHeat.discharge）が行う。
             if key in self.direct:
                 continue
             self.values[key] *= residual
 
     def snapshot(self):
         return {key: round(value, 3) for key, value in self.values.items() if value > 0.001}
+
+
+# Legacy public name.  Keeping the alias does not mean LocalLoadVector == Core H.
+HVec = LocalLoadVector
 
 
 @dataclass
@@ -115,13 +131,12 @@ class Explanation:
 
 
 class ErrorLedger:
-    """1tick分の予測差Eと、その説明を保持する。
+    """One-tick village prediction differences plus local explanations.
 
-    説明のつく誤差はM_B内で処理済みとみなし、ξへは残さない。
-    説明のつかない残差だけが不定剰余としてξへ流れる。
-
-    重要：説明には必ず具体的な根拠（進路封鎖、外力、既知の危険文脈など）を要求する。
-    無条件の下駄を置くと平常時の誤差が丸ごと消え、Leapが原理的に発火しなくなる。
+    ``residual()`` is an implementation diagnostic: it is not Core xi.  The
+    existing runtime still routes part of this value to the historical
+    exploration state; that path is retained until the staged migration reaches
+    ``npc.py`` / ``simulation.py``.
     """
 
     def __init__(self):
@@ -162,19 +177,11 @@ class ErrorLedger:
         }
 
 
-class BasalHeat:
-    """基層構造的跳躍：誤差が少ないときに仮想熱を自発生成する。
+class BasalExplorationLoad:
+    """Village-local boredom/exploration motivation.
 
-    参照:
-      RDL_階層構造モジュール §2（退屈という現象）
-      神経力学的基層構造 §1（ドーパミン D4）
-
-    誤差が起きてから対応するだけでは生存可能性が低い。予測性が非常に高い状態が
-    続くと「退屈」という仮想熱が立ち、探索行動を促す予防的誤差探索機構として働く。
-
-        誤差が少ない状態 → 仮想熱の自発生成 → 探索行動 → 新しい誤差 → M_Bの拡張
-
-    誤差ベースのHとは熱源が別なので、蓄積も別に持つ。
+    The historical class name ``BasalHeat`` is kept as an alias.  This state is
+    not Core H because it is generated without a canonical Delta(F, F').
     """
 
     def __init__(self, neuro):
@@ -184,16 +191,6 @@ class BasalHeat:
         self.quiet_ticks = 0
 
     def update(self, mean_error, margin=1.0):
-        """判定には誤差の平均を使う。
-
-        「予測性が非常に高い状態」は全チャネルにわたる予測成功度であって、
-        最大値ではない。チャネル数が多いと max はほぼ常に高く、静穏が成立しない。
-
-        margin は身体的な余裕（0で逼迫、1で余裕あり）。
-        退屈は予防的誤差探索であり、投資である。払えない投資は予防にならない。
-        「正しく飢えている」個体は予測誤差が小さいため、余裕を見ないと
-        静穏と判定されて探索に出てしまい、そのまま戻れずに死ぬ。
-        """
         threshold = self.neuro.boredom_threshold
         quiet = max(0.0, threshold - mean_error) / max(0.01, threshold)
         self.calm = self.calm * 0.88 + quiet * 0.12
@@ -205,7 +202,6 @@ class BasalHeat:
                 2.2,
             )
         else:
-            # 新しい誤差が見つかれば退屈は解消する
             self.quiet_ticks = 0
             self.value *= 1.0 - clamp(mean_error, 0.0, 1.0) * 0.5
         return self.value
@@ -219,11 +215,15 @@ class BasalHeat:
         return {"heat": round(self.value, 3), "quiet": self.quiet_ticks}
 
 
-class XiPool:
-    """ξ：不定剰余と、未確定結果の保持プール。
+BasalHeat = BasalExplorationLoad  # compatibility alias
 
-    NPC§3.6  ξ探索は一様乱数ではなく、実行可能領域内の低頻度候補を試す操作。
-    NPC§8.3  判定できない結果は成功にも失敗にも確定させず、ここへ残して後で再評価する。
+
+class ExplorationState:
+    """Village-local exploration pressure and unresolved-outcome queue.
+
+    Historical ``XiPool`` behaviour is preserved, but this state is explicitly
+    not Core xi.  The ``xi_*`` coefficient names in old profiles are legacy
+    configuration keys and will be renamed in a later compatibility pass.
     """
 
     def __init__(self, coeffs):
@@ -253,23 +253,33 @@ class XiPool:
         return due
 
     def exploration_pressure(self):
-        """ξが高いほど低頻度候補を試しやすくなる。跳躍とは別系統。"""
         return clamp(self.value / max(0.01, self.coeffs.xi_max), 0.0, 1.0)
 
 
-class Boundary:
-    """B：行動境界。θはξによって下がる（RDL_Demos/core と同式）。"""
+XiPool = ExplorationState  # compatibility alias; not Core xi
+
+
+class ActionBoundary:
+    """Village-local action/reconstruction threshold policy.
+
+    The historical policy lowers its threshold with ``ExplorationState.value``.
+    That is a simulation policy, not a Core ``B`` or ``xi -> theta`` law.  The
+    old public name ``Boundary`` remains as a compatibility alias.
+    """
 
     def __init__(self, coeffs):
         self.coeffs = coeffs
         self.summary = {}
 
-    def theta_effective(self, xi_value):
+    def theta_effective(self, exploration_value):
         return clamp(
-            self.coeffs.theta_base - xi_value * self.coeffs.xi_theta_weight,
+            self.coeffs.theta_base - exploration_value * self.coeffs.xi_theta_weight,
             self.coeffs.theta_min,
             self.coeffs.theta_max,
         )
+
+
+Boundary = ActionBoundary  # compatibility alias
 
 
 @dataclass
@@ -278,8 +288,12 @@ class LeapEvent:
     channel: str
     pressure: float
     threshold: float
-    xi: float
+    xi: float  # legacy serialized field; value is ExplorationState.value, not Core xi
     actions: list = field(default_factory=list)
+
+    @property
+    def exploration_value(self):
+        return self.xi
 
     def as_record(self):
         return {
@@ -287,16 +301,18 @@ class LeapEvent:
             "channel": self.channel,
             "pressure": round(self.pressure, 3),
             "threshold": round(self.threshold, 3),
-            "xi": round(self.xi, 3),
+            "xi": round(self.xi, 3),  # legacy record key retained for snapshot compatibility
             "actions": list(self.actions),
         }
 
 
 class LeapEngine:
-    """M_act → M_Δ → M_B' の遷移判定。
+    """Village-local structural reconfiguration trigger.
 
-    跳躍を無条件のランダム行動として実装しない（NPC§12-3、村§19-10）。
-    再編対象は最大Hのチャネルに局所化し、何を組み替えたかを記録する。
+    Existing behaviour is preserved.  This class does not by itself establish a
+    Core ``H >= theta -> M_delta`` event, because its input vector can contain
+    non-canonical local loads.  ``v23_boundary.py`` supplies the canonical
+    unresolved-H comparison boundary for migration.
     """
 
     def __init__(self, leap_coeffs, boundary):
@@ -306,8 +322,7 @@ class LeapEngine:
         self.last_basal_t = -10 ** 6
         self.count = 0
 
-    def check(self, h_vec, xi, t, exclude=()):
-        """誤差由来の跳躍。excludeで自発熱チャネルを外す。"""
+    def check(self, h_vec, exploration_state, t, exclude=()):
         if t - self.last_leap_t < self.coeffs.cooldown_ticks:
             return None
         pool = {k: v for k, v in h_vec.values.items() if k not in exclude}
@@ -315,32 +330,39 @@ class LeapEngine:
             return None
         channel = max(pool, key=lambda key: pool[key])
         pressure = pool[channel]
-        threshold = self.boundary.theta_effective(xi.value)
+        threshold = self.boundary.theta_effective(exploration_state.value)
         if pressure < threshold:
             return None
         self.last_leap_t = t
         self.count += 1
-        return LeapEvent(t=t, channel=channel, pressure=pressure, threshold=threshold, xi=xi.value)
+        return LeapEvent(
+            t=t,
+            channel=channel,
+            pressure=pressure,
+            threshold=threshold,
+            xi=exploration_state.value,
+        )
 
-    def check_basal(self, h_vec, xi, t, channel="boredom"):
-        """基層構造的跳躍。熱源が誤差ではないので、クールダウンも誤差系と分ける。
-
-        共有すると自発熱の跳躍が誤差由来の跳躍の枠を奪い、
-        本来処理すべき破断への再編が遅れる。
-        """
+    def check_basal(self, h_vec, exploration_state, t, channel="boredom"):
         if t - self.last_basal_t < self.coeffs.cooldown_ticks:
             return None
         pressure = h_vec.values.get(channel, 0.0)
-        threshold = self.boundary.theta_effective(xi.value)
+        threshold = self.boundary.theta_effective(exploration_state.value)
         if pressure < threshold:
             return None
         self.last_basal_t = t
         self.count += 1
-        return LeapEvent(t=t, channel=channel, pressure=pressure, threshold=threshold, xi=xi.value)
+        return LeapEvent(
+            t=t,
+            channel=channel,
+            pressure=pressure,
+            threshold=threshold,
+            xi=exploration_state.value,
+        )
 
 
 def weighted_choice(scored, rng, top_n=3):
-    """上位候補群からの重み付き選択（NPC§5.6）。最大値を必ず選ぶ必要はない。"""
+    """上位候補群からの重み付き選択。最大値を必ず選ぶ必要はない。"""
     if not scored:
         return None, []
     top = sorted(scored, key=lambda item: item[1], reverse=True)[:top_n]
