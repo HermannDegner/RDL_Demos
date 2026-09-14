@@ -50,6 +50,18 @@ class _LegacyMain:
         self.handle_command = handle_command
 
 
+def installed_pending_session(theta=0.5):
+    legacy = _LegacyMain()
+    session = install_shadow_session(
+        legacy,
+        session=CanonicalMigrationSession(theta=theta),
+    )
+    graph = _Graph()
+    legacy.respond("alpha", graph, None, None, None, [], None)
+    legacy.respond("alp", graph, None, None, None, [], None)
+    return legacy, session, graph
+
+
 class V23ShadowCliTests(unittest.TestCase):
     def test_install_preserves_legacy_response_and_call_count(self):
         legacy = _LegacyMain()
@@ -66,30 +78,15 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertEqual(len(session.shadow.turns), 1)
 
     def test_second_turn_forms_pending_without_auto_H_or_mutation(self):
-        legacy = _LegacyMain()
-        session = install_shadow_session(
-            legacy,
-            session=CanonicalMigrationSession(theta=0.5),
-        )
-        graph = _Graph()
-
-        legacy.respond("alpha", graph, None, None, None, [], None)
-        legacy.respond("alp", graph, None, None, None, [], None)
+        legacy, session, _ = installed_pending_session()
 
         self.assertEqual(legacy.calls, ["alpha", "alp"])
         self.assertEqual(len(session.pending_records), 1)
         self.assertEqual(session.controller.authority.h_magnitude, 0.0)
         self.assertFalse(session.controller.authority.should_reconstruct)
 
-    def test_v23_command_is_read_only_and_not_delegated(self):
-        legacy = _LegacyMain()
-        session = install_shadow_session(
-            legacy,
-            session=CanonicalMigrationSession(theta=0.5),
-        )
-        graph = _Graph()
-        legacy.respond("alpha", graph, None, None, None, [], None)
-        legacy.respond("alp", graph, None, None, None, [], None)
+    def test_v23_status_is_read_only_and_not_delegated(self):
+        legacy, session, _ = installed_pending_session()
         before_h = session.controller.authority.h_magnitude
         before_pending = len(session.pending_records)
         output = io.StringIO()
@@ -101,8 +98,60 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertEqual(legacy.command_calls, [])
         self.assertEqual(session.controller.authority.h_magnitude, before_h)
         self.assertEqual(len(session.pending_records), before_pending)
-        self.assertIn("observation-only", output.getvalue())
+        self.assertIn("read-only", output.getvalue())
         self.assertIn("pending=1", output.getvalue())
+
+    def test_explicit_resolve_review_closes_pending_without_H(self):
+        legacy, session, graph = installed_pending_session()
+        before_nodes = tuple(graph.nodes)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            handled = legacy.handle_command(
+                "/v23 resolve routing difference is accounted for",
+                None,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(legacy.command_calls, [])
+        self.assertEqual(len(session.pending_records), 0)
+        self.assertEqual(len(session.reviews), 1)
+        self.assertEqual(session.reviews[0].disposition, "resolved")
+        self.assertEqual(session.controller.authority.h_magnitude, 0.0)
+        self.assertEqual(tuple(graph.nodes), before_nodes)
+        self.assertIn("resolved", output.getvalue())
+
+    def test_explicit_unresolved_review_updates_canonical_H_only(self):
+        legacy, session, graph = installed_pending_session(theta=0.5)
+        before_nodes = tuple(graph.nodes)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            handled = legacy.handle_command(
+                "/v23 unresolved finite review cannot account for mismatch",
+                None,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(legacy.command_calls, [])
+        self.assertEqual(len(session.pending_records), 0)
+        self.assertEqual(session.reviews[0].disposition, "unresolved")
+        self.assertGreater(session.controller.authority.h_magnitude, 0.0)
+        self.assertTrue(session.controller.authority.should_reconstruct)
+        self.assertEqual(tuple(graph.nodes), before_nodes)
+        self.assertIn("node graph mutationは実行しません", output.getvalue())
+
+    def test_review_reason_is_required(self):
+        legacy, session, _ = installed_pending_session()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            legacy.handle_command("/v23 unresolved", None)
+
+        self.assertEqual(len(session.pending_records), 1)
+        self.assertEqual(len(session.reviews), 0)
+        self.assertEqual(session.controller.authority.h_magnitude, 0.0)
+        self.assertIn("review理由が必要", output.getvalue())
 
     def test_non_v23_command_is_delegated_unchanged(self):
         legacy = _LegacyMain()
@@ -124,7 +173,7 @@ class V23ShadowCliTests(unittest.TestCase):
         self.assertIs(legacy.respond, original)
         self.assertIs(legacy.handle_command, original_command)
 
-    def test_wrapper_has_no_review_or_hot_node_side_channel(self):
+    def test_wrapper_has_no_hot_node_side_channel(self):
         legacy = _LegacyMain()
         install_shadow_session(legacy)
 
