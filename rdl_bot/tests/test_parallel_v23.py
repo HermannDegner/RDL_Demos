@@ -5,6 +5,7 @@ import unittest
 from authority_v23 import CanonicalLeapAuthority
 from h_state import HState
 from parallel_v23 import CanonicalParallelObserver
+from resolution_v23 import ResolutionAssessment
 from runtime_v23 import V23ConversationShadow
 
 
@@ -36,6 +37,22 @@ def shadow_pair():
     return graph, shadow
 
 
+def resolved():
+    return ResolutionAssessment.resolved(
+        reason="comparison is accounted for",
+        assessor="parallel-test",
+        evidence_refs=("turn-1", "turn-2"),
+    )
+
+
+def unresolved():
+    return ResolutionAssessment.unresolved_case(
+        reason="comparison remains unresolved",
+        assessor="parallel-test",
+        evidence_refs=("turn-1", "turn-2"),
+    )
+
+
 class ParallelAuthorityTests(unittest.TestCase):
     def test_legacy_hot_canonical_resolved_divergence_is_visible(self):
         _, shadow = shadow_pair()
@@ -48,13 +65,14 @@ class ParallelAuthorityTests(unittest.TestCase):
             legacy_state=legacy,
             earlier_index=1,
             later_index=2,
-            unresolved=False,
+            assessment=resolved(),
         )
 
         self.assertTrue(record.legacy_should_leap)
         self.assertFalse(record.canonical_should_reconstruct)
         self.assertFalse(record.agrees)
         self.assertEqual(record.canonical_status, "observed-resolved")
+        self.assertEqual(record.assessment_assessor, "parallel-test")
 
     def test_canonical_unresolved_legacy_cold_divergence_is_visible(self):
         _, shadow = shadow_pair()
@@ -66,12 +84,13 @@ class ParallelAuthorityTests(unittest.TestCase):
             legacy_state=legacy,
             earlier_index=1,
             later_index=2,
-            unresolved=True,
+            assessment=unresolved(),
         )
 
         self.assertFalse(record.legacy_should_leap)
         self.assertTrue(record.canonical_should_reconstruct)
         self.assertFalse(record.agrees)
+        self.assertEqual(record.assessment_reason, "comparison remains unresolved")
 
     def test_parallel_observation_does_not_consume_legacy_load(self):
         _, shadow = shadow_pair()
@@ -85,7 +104,7 @@ class ParallelAuthorityTests(unittest.TestCase):
             legacy_state=legacy,
             earlier_index=1,
             later_index=2,
-            unresolved=False,
+            assessment=resolved(),
         )
 
         self.assertEqual(legacy.merged_h("node-known"), before)
@@ -103,7 +122,7 @@ class ParallelAuthorityTests(unittest.TestCase):
             legacy_state=HState(theta=2.0),
             earlier_index=1,
             later_index=2,
-            unresolved=True,
+            assessment=unresolved(),
         )
 
         self.assertEqual(record.canonical_status, "model-changed-no-E")
@@ -119,14 +138,14 @@ class ParallelAuthorityTests(unittest.TestCase):
             legacy_state=legacy,
             earlier_index=1,
             later_index=2,
-            unresolved=False,
+            assessment=resolved(),
         )
         second = observer.observe_pair(
             shadow=shadow,
             legacy_state=legacy,
             earlier_index=1,
             later_index=2,
-            unresolved=False,
+            assessment=resolved(),
         )
 
         self.assertEqual(observer.records, [first, second])
