@@ -2,31 +2,37 @@
 
 RDL（関係力学言語）の語彙を使ったCLI会話実験。
 
-現在は **Core v2.3のcanonical意味境界** と、旧v0.1由来の **legacy-local runtime** を分離して並走させている。
-現行Coreの定義根拠は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3 であり、このディレクトリに残る `EFP`、`xi_pool`、`H_pre/H_post` 等の歴史的名称をそのままCore記号として読まない。
+現在は **Core v2.3のcanonical意味境界** と、旧v0.1由来の **legacy-local runtime** を分離している。現行Coreの定義根拠は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3 であり、このディレクトリに残る `EFP`、`xi_pool`、`H_pre/H_post` 等の歴史的名称をそのままCore記号として読まない。
 
 移行の詳細と正規の現在地は [`CURRENT_v2.3.md`](./CURRENT_v2.3.md) を参照。
 
-## 現在の意味境界
+## 現在のcanonical経路
 
 ```text
-raw conversation event
-        ↓ Purpose / B / acquisition
-InteractionSection        # RIB_B のbot実装断面
-        ↓ frozen pre-response evaluator
-        F
+RIB_B(t)
+   ↓ frozen M_B(t)
+F = interp(M_B(t), RIB_B(t))
 
-later event
-        ↓ same model_ref の場合だけ比較
-        F'
-        ↓
+RIB_B(t+Δ)
+   ↓ replay through the same frozen M_B(t)
+F' = interp(M_B(t), RIB_B(t+Δ))
+   ↓
 E = Δ(F, F')
-        ↓ ResolutionAssessment
-unresolved component only
-        ↓
-canonical H candidate
-        ↓ fixed θ
+   ↓ conservative resolution policy
+zero E    -> resolved
+nonzero E -> pending-review
+   ↓ explicit review only
+unresolved E
+   ↓
+canonical H
+   ↓ fixed θ
 reconstruction eligibility
+   ↓
+targetless request
+   ↓ canonical evidence target planning
+unique target only
+   ↓
+injected mutation boundary
 ```
 
 守る境界:
@@ -34,29 +40,30 @@ reconstruction eligibility
 ```text
 raw input != RIB_B
 RIB_B != F
+F and F' use the same frozen pre-update evaluator
+live M_B change != automatic comparison failure
+B change -> canonical E is not formed
 legacy miss / deny / silence != canonical H
 unresolved input queue != Core ξ
 queue length does not change canonical θ
-model_ref changed -> canonical E is not formed
-resolved E -> canonical H does not increase
+nonzero E != unresolved by magnitude alone
+canonical reconstruction eligibility != target selection
+canonical target selection != legacy hot-node selection
 ```
+
+routing Fには `exact / partial / miss / candidate_confidence` に加え、有限なbot-local座標 `route:<node-id>` を保持する。同じconfidence・同じmatch classでも別nodeへrouteした場合に、誤って `E=0` としないためである。これはCore primitiveではない。
 
 ## Runtimeの二経路
 
-### canonical sidecar / candidate
+### default legacy CLI
 
-- `v23_state.py` — `InteractionSection / F / F' / E / UnresolvedMismatchState / CoverageState`
-- `runtime_v23.py` — 実conversation turnを有限sectionとしてshadow取得するadapter
-- `resolution_v23.py` — unresolved判定を理由・判定主体・evidence付きで保持する `ResolutionAssessment`
-- `authority_v23.py` — canonical H + fixed θだけを見る非権威的な `CanonicalLeapAuthority`
-- `parallel_v23.py` — legacy判定とcanonical候補判定をaction非介入で比較するobserver
-- `local_state.py` — `UnresolvedInputQueue` などbot-local状態の現行名
+```bash
+cd rdl_bot
+pip install -r requirements.txt
+py main.py
+```
 
-`CanonicalLeapAuthority` はまだlive CLIのaction authorityではない。現在は差分観測用の候補であり、`main.py` のノード修正・隔離・新規学習を直接発火しない。
-
-### legacy action path
-
-現行CLIの実際の修正・隔離・学習は、まだ `main.py` と `LegacyFeedbackLoadState` の旧経路が担当する。
+`main.py` の実際の修正・隔離・学習は、まだ `LegacyFeedbackLoadState` の旧経路がauthoritativeである。
 
 ```text
 miss / partial / exact / deny / rephrase / agree / silence
@@ -71,33 +78,63 @@ miss / partial / exact / deny / rephrase / agree / silence
 
 旧 `xi_pool -> theta` 結線はlive runtimeから既に切断済み。未解決入力キューは保存・後続再評価には使うが、その件数はleap閾値を動かさない。
 
+### opt-in Core v2.3 shadow CLI
+
+```bash
+py cli_v23.py
+```
+
+seed生成も併用できる。
+
+```bash
+py cli_v23.py --seed
+```
+
+`cli_v23.py` は既存 `main.main()` をそのまま使い、`respond` 呼出だけを `CanonicalMigrationSession` で包む。したがってuser-visible response、legacy feedback、session保存、LLM trust、legacy action authorityはdefault CLIと同じである。
+
+同時に隣接turnをcanonical経路で観測し、非ゼロEを `pending-review` として保存する。ただしshadow CLIは **自動review・自動H更新・自動mutationを行わない**。
+
+read-only診断:
+
 ```text
-unresolved input queue
-      ├─ save / retry / materialize later  -> keep
-      └─ queue length -> threshold         -> CUT
+/v23
 ```
 
-`h_state.unresolved_input_pressure()` は診断量として残る。歴史的API名 `xi_pressure()` はlive compatibility hookとして0を返す。
+表示内容:
 
-## 起動
+- 観測turn数
+- assessment数
+- pending-review件数
+- canonical H magnitude
+- fixed θ
+- reconstruction eligibility
+- 最新pendingのmismatch理由とevidence refs
 
-```bash
-cd rdl_bot
-pip install -r requirements.txt
-py main.py
-```
+`/v23` 自体は状態を変更しない。
 
-LLMで追加seedを作って起動する場合:
+## canonical candidate modules
 
-```bash
-py main.py --seed
-```
+- `v23_state.py` — `InteractionSection / F / F' / E / UnresolvedMismatchState / CoverageState`
+- `runtime_v23.py` — finite section取得、pre-update evaluator凍結、later section replay
+- `resolution_v23.py` — provenance付き `ResolutionAssessment`
+- `assessment_policy_v23.py` — zero→resolved / nonzero→pending の保守的形成規則
+- `authority_v23.py` — canonical H + fixed θだけを見る `CanonicalLeapAuthority`
+- `canonical_runtime_v23.py` — real turn pairからresolved/pendingへ接続するcontroller
+- `action_gate_v23.py` — targetless `ReconstructionRequest`
+- `target_planner_v23.py` — canonical turn evidenceだけからtarget候補を計画
+- `executor_v23.py` — unique targetだけをinjected mutation callbackへ渡す境界
+- `pipeline_v23.py` — explicit review後のend-to-end candidate pipeline
+- `migration_session_v23.py` — legacy応答を変えずpendingを蓄積するsession
+- `cli_v23.py` — opt-in shadow CLI入口とread-only `/v23`
+- `parallel_v23.py` — legacy/canonical判定をaction非介入で比較
+- `local_state.py` — `UnresolvedInputQueue` 等bot-local状態の現行名
+- `candidate_v23.py` — Step 4時点のthreshold-neutral compatibility adapter
 
-LLM接続なしでも同梱seedで最小動作する。
+canonical candidate pathはexecutor境界まで実装されているが、**default CLIのmutation authorityにはまだ切り替えていない**。
 
 ## CLIコマンド
 
-既存CLI互換のため、表示名にはpre-v2.3語彙がまだ残る。
+既存CLI互換のため、default表示名にはpre-v2.3語彙がまだ残る。
 
 | コマンド | 現在の扱い |
 |---|---|
@@ -110,33 +147,11 @@ LLM接続なしでも同梱seedで最小動作する。
 | `/xipool` | unresolved input queue のhistorical alias表示 |
 | `/graph` | ノードグラフ統計 |
 | `/hot` | legacy feedback/loadの高いノード表示 |
+| `/v23` | **shadow CLIのみ**。canonical read-only診断 |
 | `/quit` | 保存して終了 |
 | `y / n / ?` | 直前応答へのlegacy feedback入力 |
 
 `y / n / ?` や miss/silence はlegacy feedback stateを更新するが、canonical Hへ直接加算されない。
-
-## ファイル構成
-
-```text
-rdl_bot/
-├── main.py                 legacy CLI action path
-├── node_graph.py           Node / NodeGraph
-├── h_state.py              LegacyFeedbackLoadState + queue-threshold compatibility hook
-├── local_state.py          UnresolvedInputQueue 等のbot-local名
-├── v23_state.py            canonical v2.3意味境界
-├── runtime_v23.py          conversation shadow acquisition
-├── resolution_v23.py       ResolutionAssessment
-├── authority_v23.py        canonical fixed-θ authority candidate
-├── parallel_v23.py         legacy/canonical decision comparison
-├── candidate_v23.py        migration candidate adapters
-├── llm_bridge.py           LLM bridge
-├── llm_trust.py            domain-local LLM trust model
-├── sfo_profile.py          SFO operational profile
-├── dynamics.py             legacy/demo-local係数設定
-├── CURRENT_v2.3.md         migrationの正規現在地
-├── RDL_個人MB外部化AI_中間設計図_v0.3.md   pre-v2.3形成史
-└── tests/
-```
 
 ## テスト
 
@@ -150,20 +165,25 @@ GitHub Actionsではbotテストに加えてVillage回帰とNode側公開デモ�
 
 v2.3側では少なくとも次を固定している。
 
-- raw text と `InteractionSection` を分離する
-- same pre-update model_ref のときだけ `F / F'` を比較する
+- raw text と finite `InteractionSection` を分離
+- later `RIB_B` をearlier frozen evaluatorへreplayしてF'を形成
+- B変更時はEを形成しない
+- same match class / same confidenceでもroute変更をF差分として保持
 - `E = Δ(F,F')` を直接Hと同一視しない
-- resolved mismatchはcanonical Hへ入れない
+- zero Eだけを自動resolvedにできる
+- nonzero Eはpendingに留める
+- pendingは元turn evidenceを保持し、explicit review provenanceと結合する
 - legacy feedback eventはcanonical Hを変更しない
-- unresolved queueの件数はθを変更しない
-- unresolved判定には `ResolutionAssessment` を要求し、裸のboolや `deny -> unresolved` shortcutを作らない
-- candidate authorityはfixed θを使い、pressure/feedback入力口を持たない
-- legacy/canonicalの判定差をaction非介入で記録できる
+- unresolved queue件数はfixed θを変更しない
+- unresolved判定には `ResolutionAssessment` を要求し、裸boolや `deny -> unresolved` shortcutを作らない
+- reconstruction eligibilityとtarget selectionを分離
+- target plannerはlegacy hot-nodeを参照しない
+- ambiguous/missing targetはexecutorへ進まない
+- end-to-end pipelineはexplicit reviewなしではmutationへ到達しない
+- shadow CLIはlegacy応答を変えず、`/v23` はread-only
 
 ## 形成史
 
-旧v0.1系の数式、`EFP / ξ / H_pre/H_post / θ_eff` 結線、SFO仮説、NN/LangGraph借用の説明は形成史としてGit履歴および
-[`RDL_個人MB外部化AI_中間設計図_v0.3.md`](./RDL_個人MB外部化AI_中間設計図_v0.3.md)
-に保持する。
+旧v0.1系の数式、`EFP / ξ / H_pre/H_post / θ_eff` 結線、SFO仮説、NN/LangGraph借用の説明は形成史としてGit履歴および [`RDL_個人MB外部化AI_中間設計図_v0.3.md`](./RDL_個人MB外部化AI_中間設計図_v0.3.md) に保持する。
 
-それらはCore v2.3の規範定義ではない。現行の移行判断では、まず `CURRENT_v2.3.md` と `v23_state.py` / `authority_v23.py` の契約を優先する。
+それらはCore v2.3の規範定義ではない。現行の移行判断では、まず `CURRENT_v2.3.md` とcanonical v2.3 module群の契約を優先する。
