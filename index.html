@@ -227,6 +227,7 @@
       text-decoration: none;
     }
 
+    .bot-link + .bot-link { margin-top: 10px; }
     .bot-link:hover { border-color: var(--violet); }
     .bot-link strong { display: block; margin-bottom: 5px; }
     .bot-link span { color: var(--muted); font-size: 0.82rem; }
@@ -255,7 +256,7 @@
     <h1>RDL Demos</h1>
     <p class="lead">
       関係、有限な観測、解釈差、再編が、運動としてどう現れるかを見る実験集です。
-      参照実装はCore v2.3へ移行済みですが、各デモにはpre-v2.3の歴史的変数名も残るため、デモ固有量とCore記号を分けて扱います。
+      参照実装はCore v2.3へ移行済みです。既存デモ由来のローカル負荷・探索圧・未解決入力圧は、現行Core H / ξ と分離して段階移行しています。
     </p>
   </header>
 
@@ -269,7 +270,7 @@
         <div>
           <span class="stage">Ecology 06 · Integrated</span>
           <h3>RDL Living Field</h3>
-          <p>RabbitとPredatorを共通RelationalAgent型で動かし、知覚制約、資源転移、地形、個体別記憶、予測差と再編を統合。内部の旧H_vec / xi名は現在Core v2.3への移行対象。</p>
+          <p>RabbitとPredatorを共通RelationalAgent型で動かし、知覚制約、資源転移、地形、個体別記憶、予測差と再編を統合。Core v2.3のcanonical比較境界を並走し、画面とapp読取はローカル負荷・適応圧・ローカル閾値へ改名済み。</p>
         </div>
         <span class="feature-arrow" aria-hidden="true">↗</span>
       </a>
@@ -290,35 +291,35 @@
           <span class="stage">Ecology 01</span>
           <h3>勾配で動く最小生態系</h3>
           <p>草・捕食者・被食者。同じ草が、食料にも隠れ場にもなる。</p>
-          <span class="version">RDF minimal world ver2 · 旧 demo3</span>
+          <span class="version">RDF minimal world ver2 · legacy demo-local model · 旧 demo3</span>
         </a>
 
         <a class="card" href="./demos/ecology-limited-senses/">
           <span class="stage">Ecology 02</span>
           <h3>感覚が制約された少数戦術</h3>
           <p>視覚と音を分離し、遮蔽と警戒が行動選択を変える。</p>
-          <span class="version">RDF minimal world ver2.1 · 旧 demo4</span>
+          <span class="version">RDF minimal world ver2.1 · legacy demo-local model · 旧 demo4</span>
         </a>
 
         <a class="card" href="./demos/ecology-multi-resource/">
           <span class="stage">Ecology 03</span>
           <h3>複合資源による生存選択</h3>
           <p>水場を加え、空腹・渇き・危険の勾配を競合させる。</p>
-          <span class="version">RDF minimal world ver3 · 旧 demo5</span>
+          <span class="version">RDF minimal world ver3 · legacy demo-local model · 旧 demo5</span>
         </a>
 
         <a class="card" href="./demos/rabbit-active-threat/">
           <span class="stage">Ecology 04</span>
           <h3>能動的脅威とアンカー行動</h3>
           <p>追跡する脅威に対し、5羽のウサギが退避と資源確保を両立する。</p>
-          <span class="version">RDF Rabbit Demo v3.1 · 旧 demo6</span>
+          <span class="version">RDF Rabbit Demo v3.1 · legacy demo-local model · 旧 demo6</span>
         </a>
 
         <a class="card" href="./demos/rabbit-resource-relocation/">
           <span class="stage">Ecology 05</span>
           <h3>資源枯渇と即時転移</h3>
           <p>草と水が枯渇後に場所を変え、永続的な安全地帯を崩す。</p>
-          <span class="version">RDF Rabbit Demo v4.1 · 旧 demo0</span>
+          <span class="version">RDF Rabbit Demo v4.1 · legacy demo-local model · 旧 demo0</span>
         </a>
       </div>
     </section>
@@ -333,7 +334,7 @@
           <span class="stage">Experiment A</span>
           <h3>近傍セル評価とパラメータ探索</h3>
           <p>81条件を比較し、生存・介入・脱出から実行パラメータを選ぶ。</p>
-          <span class="version">RDF v4 整理版 · 旧 demo1</span>
+          <span class="version">RDF v4 整理版 · demo-local parameter experiment · 旧 demo1</span>
         </a>
       </div>
     </section>
@@ -348,17 +349,22 @@
           <span class="stage">Experiment B</span>
           <h3>Non-Euclidean Warp Navigation</h3>
           <p>迷路内の失敗を局所履歴と方向として残し、流れ場から経路を学ぶ。内部の「熱」はCore Hと自動的に同一ではない。</p>
-          <span class="version">Field navigation · 旧 demo2</span>
+          <span class="version">Field navigation · demo-local dynamics · 旧 demo2</span>
         </a>
       </div>
     </section>
 
     <section aria-labelledby="bot-heading">
       <div class="section-head">
-        <h2 id="bot-heading">CLI実装</h2>
+        <h2 id="bot-heading">Python実装</h2>
+        <p class="section-note">canonical v2.3境界とlegacy-local runtimeを分離して並走</p>
       </div>
       <a class="bot-link" href="https://github.com/HermannDegner/RDL_Demos/tree/main/rdl_bot">
-        <span><strong>rdl_bot — 会話実験</strong>旧EFP / xi / H結線を含むpre-v2.3実装。現在はRIB_B / F / F' / E / unresolved Hのcanonical並走層へ移行中。</span>
+        <span><strong>rdl_bot — 会話実験</strong>`InteractionSection → F/F' → Δ(F,F') → unresolved H` のsidecar導入済み。旧HState / xi_pressureはlegacy-local compatibility roleへ降格。</span>
+        <i>README →</i>
+      </a>
+      <a class="bot-link" href="https://github.com/HermannDegner/RDL_Demos/tree/main/rdl_village">
+        <span><strong>rdl_village — 簡易村</strong>canonical v2.3境界を並走。旧HVec / XiPool / BoundaryはLocalLoadVector / ExplorationState / ActionBoundaryの互換名へ降格。</span>
         <i>README →</i>
       </a>
     </section>
