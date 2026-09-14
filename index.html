@@ -254,8 +254,8 @@
     <p class="eyebrow">Relational Dynamics Language</p>
     <h1>RDL Demos</h1>
     <p class="lead">
-      関係、勾配、誤差、再編が、運動としてどう現れるかを見る実験集です。
-      番号ではなく、各デモの役割と発展関係に沿って並べています。
+      関係、有限な観測、解釈差、再編が、運動としてどう現れるかを見る実験集です。
+      参照実装はCore v2.3へ移行済みですが、各デモにはpre-v2.3の歴史的変数名も残るため、デモ固有量とCore記号を分けて扱います。
     </p>
   </header>
 
@@ -269,7 +269,7 @@
         <div>
           <span class="stage">Ecology 06 · Integrated</span>
           <h3>RDL Living Field</h3>
-          <p>RabbitとPredatorを共通RelationalAgent型で動かし、知覚制約、資源転移、地形、個体別記憶、H_vecとLeapを統合。互いを環境として学ぶ二種系を追跡する。</p>
+          <p>RabbitとPredatorを共通RelationalAgent型で動かし、知覚制約、資源転移、地形、個体別記憶、予測差と再編を統合。内部の旧H_vec / xi名は現在Core v2.3への移行対象。</p>
         </div>
         <span class="feature-arrow" aria-hidden="true">↗</span>
       </a>
@@ -341,13 +341,13 @@
     <section class="standalone" aria-labelledby="field-heading">
       <div class="section-head">
         <h2 id="field-heading">場と経路の学習</h2>
-        <p class="section-note">生態系とは独立した、H_vecとフロー場の実験</p>
+        <p class="section-note">生態系とは独立した、失敗履歴とフロー場のデモ固有実験</p>
       </div>
       <div class="grid">
         <a class="card" href="./demos/warp-navigation/">
           <span class="stage">Experiment B</span>
           <h3>Non-Euclidean Warp Navigation</h3>
-          <p>迷路内の失敗を熱と方向として残し、流れ場から経路を学ぶ。</p>
+          <p>迷路内の失敗を局所履歴と方向として残し、流れ場から経路を学ぶ。内部の「熱」はCore Hと自動的に同一ではない。</p>
           <span class="version">Field navigation · 旧 demo2</span>
         </a>
       </div>
@@ -358,12 +358,12 @@
         <h2 id="bot-heading">CLI実装</h2>
       </div>
       <a class="bot-link" href="https://github.com/HermannDegner/RDL_Demos/tree/main/rdl_bot">
-        <span><strong>rdl_bot — 個人M_B外部化AI</strong>H蓄積、leap、LLM信用度、ノード学習を扱うCLI実装</span>
+        <span><strong>rdl_bot — 会話実験</strong>旧EFP / xi / H結線を含むpre-v2.3実装。現在はRIB_B / F / F' / E / unresolved Hのcanonical並走層へ移行中。</span>
         <i>README →</i>
       </a>
     </section>
   </main>
 
-  <footer>RDL Demos — experiments in relations, gradients and structural change.</footer>
+  <footer>RDL Demos — experiments in relations, finite observation and structural change.</footer>
 </body>
 </html>
