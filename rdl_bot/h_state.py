@@ -18,10 +18,11 @@ from typing import Dict, Optional, Sized
 
 
 def unresolved_input_pressure(pool: Sized, saturation: Optional[float] = None) -> float:
-    """Normalize the legacy unresolved-input queue length into a local pressure.
+    """Normalize unresolved-input queue length as a diagnostic coverage signal.
 
-    This is an observable bot-local coverage / unresolved-input metric.  It is
-    explicitly not Core xi.
+    This remains available for observability and historical analysis.  It is a
+    bot-local coverage / deferred-processing metric, explicitly not Core xi and
+    no longer an input to the live CLI leap threshold.
     """
     saturation = dynamics.resolve(saturation, "xi_saturation")  # legacy config key
     if saturation <= 0:
@@ -29,8 +30,17 @@ def unresolved_input_pressure(pool: Sized, saturation: Optional[float] = None) -
     return min(1.0, len(pool) / saturation)
 
 
-# Compatibility import used by the historical CLI/tests.
-xi_pressure = unresolved_input_pressure
+def xi_pressure(pool: Sized, saturation: Optional[float] = None) -> float:
+    """Historical CLI compatibility hook, now threshold-neutral.
+
+    Step 4 of the Core v2.3 migration cuts the old
+    ``unresolved queue length -> local threshold`` connection.  Existing callers
+    keep this function name so the CLI/session surface does not break, but the
+    authoritative runtime receives zero pressure.  Use
+    :func:`unresolved_input_pressure` when the queue-size diagnostic itself is
+    needed.
+    """
+    return 0.0
 
 
 @dataclass
@@ -88,11 +98,11 @@ class LegacyFeedbackLoadState:
     H_PRE_WEIGHT = 0.4
 
     def _local_pressure_adjustment(self, pressure: float) -> float:
-        """Historical bot-local threshold adjustment.
+        """Historical bot-local threshold experiment.
 
-        The formula and random jitter are retained only for behavioural
-        compatibility. ``pressure`` is unresolved-input pressure, not Core xi,
-        and this function must not be cited as a Core ``xi -> theta`` rule.
+        Kept only so old sessions/tests can reproduce the pre-cutover experiment
+        when an explicit pressure value is supplied directly.  The live CLI no
+        longer derives such a value from the unresolved-input queue.
         """
         if pressure <= 0:
             return 0.0
@@ -106,11 +116,11 @@ class LegacyFeedbackLoadState:
         return self._local_pressure_adjustment(pressure)
 
     def local_threshold(self, pressure: float = 0.0) -> float:
-        """Legacy CLI threshold policy; not the canonical Core theta rule."""
+        """Historical pressure-sensitive threshold experiment; not Core theta."""
         return self.theta + self._local_pressure_adjustment(pressure)
 
     def theta_eff(self, pressure: float = 0.0) -> float:
-        """Compatibility alias for the historical CLI/tests."""
+        """Compatibility alias for the historical pressure experiment."""
         return self.local_threshold(pressure)
 
     def merged_h(self, node_id: str) -> float:
@@ -188,8 +198,8 @@ class LegacyFeedbackLoadState:
         max_post = max(self.H_post.values(), default=0.0)
         return (
             f"legacy_pre={max_pre:.2f}  legacy_post={max_post:.2f}  "
-            f"local_theta={self.theta:.2f}  unresolved_input_pressure={pressure:.2f}  "
-            f"θ_eff≈{self.theta_eff(pressure):.2f}"
+            f"local_theta={self.theta:.2f}  runtime_queue_threshold_pressure={pressure:.2f}  "
+            f"legacy_theta_eff≈{self.theta_eff(pressure):.2f}"
         )
 
     def hot_nodes(self, top: int = 3) -> list[tuple[str, float]]:
