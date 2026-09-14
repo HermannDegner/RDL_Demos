@@ -35,6 +35,42 @@ class UnresolvedInputQueue(list[str]):
         return super().__iter__()
 
 
+class ThresholdNeutralQueueView:
+    """Compatibility view that preserves queue writes but exposes zero pressure.
+
+    The legacy response path obtains its local threshold pressure from
+    ``len(xi_pool)``.  This view deliberately reports length zero while routing
+    ``append`` and iteration to the real unresolved-input queue.  It therefore
+    lets migration tests cut only the queue->threshold coupling without losing
+    deferred inputs.
+
+    This is a transition mechanism, not a Core object.
+    """
+
+    def __init__(self, queue: UnresolvedInputQueue | list[str]) -> None:
+        self.queue = queue
+
+    def __len__(self) -> int:
+        return 0
+
+    def __bool__(self) -> bool:
+        return False
+
+    def append(self, value: str) -> None:
+        self.queue.append(str(value))
+
+    def __iter__(self):
+        return iter(self.queue)
+
+    def __getitem__(self, index):
+        return self.queue[index]
+
+    def pending(self) -> tuple[str, ...]:
+        return tuple(self.queue)
+
+
 # Historical vocabulary note only; do not introduce a XiPool alias here.
-# Existing main.py arguments named ``xi_pool`` continue to accept this object
-# because it is list-compatible.  New code should use UnresolvedInputQueue.
+# Existing main.py arguments named ``xi_pool`` continue to accept
+# UnresolvedInputQueue because it is list-compatible.  New code should use the
+# role name above.  ThresholdNeutralQueueView is only for the staged step that
+# removes the legacy queue-length -> threshold coupling.
