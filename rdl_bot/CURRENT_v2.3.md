@@ -43,6 +43,7 @@ coverage / missing / unknown / rejection != ξ
 noise / random jitter != ξ
 all E != H
 runtime unresolved-input queue length does not change theta
+legacy miss / deny / silence do not mutate canonical H
 model_ref changed -> canonical E NOT FORMED
 ```
 
@@ -63,7 +64,9 @@ miss / partial / exact / deny / rephrase / agree / silence
           legacy leap / correction
 ```
 
-ただし、旧 `xi_pool -> theta` 結線はlive runtimeから切断済み。
+このlegacy feedback/load状態とcanonical Hは**別の状態型**として固定済み。`miss / deny / silence` を発生させても `UnresolvedMismatchState` は変化しない。canonical Hを増やせるのは、same pre-update modelで形成した `F / F'` のcanonical mismatchを明示的に `unresolved=True` として観測した場合だけである。
+
+旧 `xi_pool -> theta` 結線はlive runtimeから切断済み。
 
 ```text
 unresolved input queue
@@ -89,8 +92,8 @@ unresolved input queue
 2. **DONE** — conversation eventからcanonical sectionをshadow取得し、same model_refの場合だけ入力F同士を比較可能にする
 3. **PARTIAL** — `xi_pool` の実役割を `UnresolvedInputQueue` として分離し、新APIでは `unresolved_queue` を使用。`main.py` 内部名とCLI表示はcompatibilityとして残存
 4. **DONE** — unresolved-input queue length -> theta のlive runtime結線を切断。キュー診断量は保持
-5. **NEXT** — `miss / deny / silence` 等のlegacy feedback eventをcanonical Hと同一視しない境界をruntime上でも固定し、canonical mismatchとの対応が成立する場合だけcanonical Hへ接続
-6. leap / reconstruction判定をcanonical Hと固定θの経路へ切替
+5. **DONE** — `miss / deny / silence` 等のlegacy feedback eventとcanonical Hを型・更新経路の両方で分離。canonical mismatchを明示的にunresolvedと判定した場合だけcanonical Hへ接続可能
+6. **NEXT** — leap / reconstruction判定の候補authorityをcanonical H + fixed θで構成し、legacy action pathと並走検証する
 7. 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
 各段階で既存CLIのsession保存、LLM trust、node graph、SFO profileの回帰を維持する。ただしStep 4以降、pre-v2.3のqueue-driven threshold挙動は意図的に互換対象から外れる。
@@ -117,3 +120,10 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 - `unresolved_input_pressure()` はキュー長のdiagnosticとして動く
 - live `xi_pressure()` は常に0で、queue lengthをthetaへ結線しない
 - explicit pressureを与えたlegacy threshold実験APIはhistorical regressionとしてのみ残る
+
+`test_feedback_boundary_v23.py` はStep 5として次を固定する。
+
+- `LegacyFeedbackLoadState` と `UnresolvedMismatchState` は別型
+- legacy `miss / deny / silence` はcanonical Hを変更しない
+- resolved canonical mismatchはHへ入らない
+- unresolved canonical mismatchだけがcanonical Hを増やせる
