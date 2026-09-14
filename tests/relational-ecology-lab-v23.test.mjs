@@ -7,6 +7,7 @@ import {
   InteractionSection,
   UnresolvedMismatchState,
   acquireInteractionSection,
+  assessMismatch,
   compareInterpretations,
   interpretSection,
   legacyLocalDynamicsView,
@@ -33,6 +34,18 @@ function near(actual, expected, epsilon = 1e-12) {
   assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} != ${expected}`);
 }
 
+function mismatchFor(currentPayload, laterPayload) {
+  const current = interpretSection(
+    acquireInteractionSection({ sectionId: 't0', context: context(), payload: currentPayload }),
+    { modelRef: 'M_B:pre-update:1', interpreter },
+  );
+  const later = interpretSection(
+    acquireInteractionSection({ sectionId: 't1', context: context(), payload: laterPayload }),
+    { modelRef: 'M_B:pre-update:1', interpreter },
+  );
+  return compareInterpretations(current, later);
+}
+
 test('raw ecology data and RIB_B section remain distinct', () => {
   const raw = { resource: 0.2, danger: 0.1, motion: 0.7 };
   const section = acquireInteractionSection({
@@ -49,16 +62,10 @@ test('raw ecology data and RIB_B section remain distinct', () => {
 });
 
 test("same pre-update model forms F, F' and canonical E", () => {
-  const currentSection = acquireInteractionSection({
-    sectionId: 't0', context: context(), payload: { resource: 0.2, danger: 0.1, motion: 0.7 },
-  });
-  const laterSection = acquireInteractionSection({
-    sectionId: 't1', context: context(), payload: { resource: 0.6, danger: 0.25, motion: 0.4 },
-  });
-
-  const current = interpretSection(currentSection, { modelRef: 'M_B:pre-update:1', interpreter });
-  const later = interpretSection(laterSection, { modelRef: 'M_B:pre-update:1', interpreter });
-  const mismatch = compareInterpretations(current, later);
+  const mismatch = mismatchFor(
+    { resource: 0.2, danger: 0.1, motion: 0.7 },
+    { resource: 0.6, danger: 0.25, motion: 0.4 },
+  );
 
   near(mismatch.values.resource, 0.4);
   near(mismatch.values.danger, 0.15);
@@ -77,38 +84,99 @@ test('model drift is rejected before E is formed', () => {
   assert.throws(() => compareInterpretations(current, later), /same pre-update modelRef/);
 });
 
-test('resolved canonical mismatch does not enter H', () => {
-  const state = new UnresolvedMismatchState({ theta: 0.3, decay: 1 });
-  const current = interpretSection(
-    acquireInteractionSection({ sectionId: 't0', context: context(), payload: { resource: 0.1 } }),
-    { modelRef: 'M_B:1', interpreter },
-  );
-  const later = interpretSection(
-    acquireInteractionSection({ sectionId: 't1', context: context(), payload: { resource: 0.8 } }),
-    { modelRef: 'M_B:1', interpreter },
-  );
-  const mismatch = compareInterpretations(current, later);
+test('non-zero E stays pending until an explicit evidence-backed assessment is supplied', () => {
+  const mismatch = mismatchFor({ resource: 0.1 }, { resource: 0.7 });
+  const pending = assessMismatch(mismatch);
 
-  state.observe(mismatch, { unresolved: false });
+  assert.equal(pending.status, 'pending-assessment');
+  assert.equal(pending.eligibleForH, false);
+  assert.equal(pending.pending, true);
+
+  const temporal = assessMismatch(mismatch, {
+    classification: 'ordinary-temporal-change',
+    basis: 'adjacent observation changed; no prediction-failure claim is available',
+  });
+  const coverage = assessMismatch(mismatch, {
+    classification: 'boundary-or-coverage-change',
+    basis: 'the later observation was formed under changed acquisition coverage',
+  });
+  const resolved = assessMismatch(mismatch, {
+    classification: 'resolved-difference',
+    basis: 'the current finite model absorbed the difference without residual mismatch',
+  });
+
+  for (const assessment of [temporal, coverage, resolved]) {
+    assert.equal(assessment.eligibleForH, false);
+    assert.equal(assessment.pending, false);
+  }
+
+  assert.throws(
+    () => assessMismatch(mismatch, { classification: 'unresolved-mismatch' }),
+    /requires a non-empty basis/,
+  );
+  const unresolved = assessMismatch(mismatch, {
+    classification: 'unresolved-mismatch',
+    basis: 'the difference remains after the finite model attempted local absorption',
+    provenance: { source: 'explicit-review', reviewId: 'review-1' },
+  });
+  assert.equal(unresolved.eligibleForH, true);
+  assert.equal(unresolved.provenance.source, 'explicit-review');
+});
+
+test('zero E is resolved as zero-difference without inventing unresolved evidence', () => {
+  const mismatch = mismatchFor({ danger: 0.2 }, { danger: 0.2 });
+  const assessment = assessMismatch(mismatch);
+  assert.equal(assessment.status, 'zero-difference');
+  assert.equal(assessment.eligibleForH, false);
+  assert.throws(
+    () => assessMismatch(mismatch, {
+      classification: 'unresolved-mismatch',
+      basis: 'invalid test claim',
+    }),
+    /zero mismatch cannot be classified/,
+  );
+});
+
+test('pending or resolved assessment cannot silently enter H', () => {
+  const state = new UnresolvedMismatchState({ theta: 0.3, decay: 1 });
+  const mismatch = mismatchFor({ resource: 0.1 }, { resource: 0.8 });
+  const pending = assessMismatch(mismatch);
+
+  assert.throws(
+    () => state.observe(mismatch, { assessment: pending }),
+    /pending mismatch assessment cannot update H/,
+  );
+
+  const resolved = assessMismatch(mismatch, {
+    classification: 'resolved-difference',
+    basis: 'difference was locally absorbed',
+  });
+  state.observe(mismatch, { assessment: resolved });
   assert.equal(state.magnitude, 0);
   assert.equal(state.shouldReconstruct, false);
 });
 
-test('unresolved canonical mismatch can drive fixed theta', () => {
+test('only explicit unresolved assessment can drive fixed theta', () => {
   const state = new UnresolvedMismatchState({ theta: 0.3, decay: 1 });
-  const current = interpretSection(
-    acquireInteractionSection({ sectionId: 't0', context: context(), payload: { danger: 0.1 } }),
-    { modelRef: 'M_B:1', interpreter },
-  );
-  const later = interpretSection(
-    acquireInteractionSection({ sectionId: 't1', context: context(), payload: { danger: 0.5 } }),
-    { modelRef: 'M_B:1', interpreter },
-  );
+  const mismatch = mismatchFor({ danger: 0.1 }, { danger: 0.5 });
+  const assessment = assessMismatch(mismatch, {
+    classification: 'unresolved-mismatch',
+    basis: 'local absorption was attempted and the mismatch remained',
+  });
 
-  state.observe(compareInterpretations(current, later), { unresolved: true });
+  state.observe(mismatch, { assessment });
   near(state.magnitude, 0.4);
   assert.equal(state.shouldReconstruct, true);
   assert.equal(state.theta, 0.3);
+});
+
+test('legacy unresolved boolean remains compatible but explicit assessment is preferred', () => {
+  const state = new UnresolvedMismatchState({ theta: 1, decay: 1 });
+  const mismatch = mismatchFor({ motion: 0.1 }, { motion: 0.3 });
+  state.observe(mismatch, { unresolved: false });
+  assert.equal(state.magnitude, 0);
+  state.observe(mismatch, { unresolved: true });
+  near(state.magnitude, 0.2);
 });
 
 test('coverage remains separate from H and Core xi', () => {

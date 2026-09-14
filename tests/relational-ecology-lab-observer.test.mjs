@@ -26,6 +26,13 @@ test("actual Rabbit and Predator windows are observed without changing seeded ev
     assert.ok(snapshots.some((entry) => entry.agentRef.startsWith("rabbit:") && entry.comparisons > 0));
     assert.ok(snapshots.some((entry) => entry.agentRef.startsWith("predator:") && entry.comparisons > 0));
     assert.ok(snapshots.every((entry) => !entry.dimensions.includes("attack")));
+    for (const entry of snapshots) {
+      const assessed = Object.values(entry.assessmentCounts).reduce((sum, count) => sum + count, 0);
+      assert.equal(assessed, entry.comparisons);
+      assert.ok(Object.keys(entry.assessmentCounts).every(
+        (status) => status === "pending-assessment" || status === "zero-difference",
+      ));
+    }
     assert.ok(normal.v23Snapshot().every((entry) => entry === null));
   }
 });
@@ -44,6 +51,33 @@ test("later observation uses earlier copied coefficients despite live adaptation
   assert.equal(result.F.modelRef, result.FPrime.modelRef);
   assert.equal(result.earlierSection.payload.resource, 0.2);
   assert.equal(result.status, "pending-assessment");
+  assert.equal(result.assessment.eligibleForH, false);
+  assert.equal(observer.snapshot().assessmentCounts["pending-assessment"], 1);
+  assert.equal(observer.snapshot().H, undefined);
+});
+
+test("observer accepts explicit evidence-backed classification without creating H", () => {
+  const observer = new LivingFieldObserver({ agentRef: "rabbit:0", dimensions: ["danger"] });
+  observer.capture({
+    tick: 1,
+    observed: { danger: 0.1 },
+    reliability: { danger: 0.8 },
+  });
+  const result = observer.capture({
+    tick: 2,
+    observed: { danger: 0.7 },
+    reliability: { danger: 0.8 },
+    assessment: {
+      classification: "unresolved-mismatch",
+      basis: "explicit finite review says the mismatch remained after local absorption",
+      provenance: { source: "test-review" },
+    },
+  });
+
+  assert.equal(result.status, "unresolved-mismatch");
+  assert.equal(result.assessment.eligibleForH, true);
+  assert.equal(result.assessment.provenance.source, "test-review");
+  assert.equal(observer.snapshot().assessmentCounts["unresolved-mismatch"], 1);
   assert.equal(observer.snapshot().H, undefined);
 });
 
@@ -64,6 +98,7 @@ test("diagnostic snapshots are immutable and isolated between agents and episode
   simulation.step(120);
   const snapshot = simulation.v23Snapshot();
   assert.throws(() => { snapshot[0].samples = 999; }, TypeError);
+  assert.throws(() => { snapshot[0].assessmentCounts.fake = 999; }, TypeError);
   assert.notStrictEqual(simulation.rabbits[0].v23Observer, simulation.rabbits[1].v23Observer);
   const old = simulation.rabbits[0].v23Observer;
   simulation.createEpisode();
