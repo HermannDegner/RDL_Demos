@@ -3,7 +3,7 @@
 Status: **migration in progress**  
 Normative semantic reference: `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3.
 
-`rdl_bot` は旧RDL世代から継続している会話実験であり、既存コードには `EFP`、`xi_pool`、`H_pre/H_post`、`theta_eff = theta + g(xi)` などの pre-v2.3 設計が残っている。
+`rdl_bot` は旧RDL世代から継続している会話実験であり、既存コードには `EFP`、`xi_pool`、`H_pre/H_post` などの pre-v2.3 設計名が残っている。
 
 それらは現行Coreの規範実装として読まない。
 
@@ -42,7 +42,7 @@ coverage / missing / unknown / rejection != H
 coverage / missing / unknown / rejection != ξ
 noise / random jitter != ξ
 all E != H
-θ is not lowered by a measurable "ξ pressure"
+runtime unresolved-input queue length does not change theta
 model_ref changed -> canonical E NOT FORMED
 ```
 
@@ -50,20 +50,32 @@ model_ref changed -> canonical E NOT FORMED
 
 `UnresolvedMismatchState` はcanonical `E = Δ(F,F')` の未解決成分だけを保持する。ユーザーの否定、沈黙、未知入力、LLM呼出回数などを、それ自体としてCore Hへ加算しない。
 
-## Legacy runtime
+## Runtime migration state
 
-現行CLIのauthoritative action pathはまだ旧経路を利用している。
+現行CLIのauthoritative action pathは、まだ `LegacyFeedbackLoadState` を再編判断に使っている。
 
 ```text
-xi_pool
-H_pre / H_post
-theta_eff = theta + g(xi)
-miss / deny / silence -> legacy feedback load
+miss / partial / exact / deny / rephrase / agree / silence
+                    ↓
+          LegacyFeedbackLoadState
+             H_pre / H_post
+                    ↓
+          legacy leap / correction
 ```
 
-この経路は **compatibility / historical implementation** であり、段階移行対象。
+ただし、旧 `xi_pool -> theta` 結線はlive runtimeから切断済み。
 
-コード上では旧 `HState` は `LegacyFeedbackLoadState`、旧 `xi_pressure` は `unresolved_input_pressure` のcompatibility aliasへ降格済み。これらをCore H / ξそのものとして扱わない。
+```text
+unresolved input queue
+      ├─ 保存 / 後続再評価 / ノード化      → 維持
+      └─ queue length -> leap threshold    → CUT
+```
+
+`h_state.unresolved_input_pressure()` はキュー長の**診断量**として残るが、`h_state.xi_pressure()` はlive CLI compatibility hookとして0を返す。したがって未解決入力の件数は、現行CLIのleap閾値を上下させない。
+
+`LegacyFeedbackLoadState.theta_eff(explicit_pressure)` などのpressure-sensitive実験APIは形成史・回帰用に残るが、live CLIは未解決キューからそのpressureを供給しない。
+
+実役割名として `local_state.UnresolvedInputQueue` を追加済みで、v2.3 adapter側APIは `unresolved_queue` を使う。`main.py` 内部の `xi_pool` 変数名・`/xipool` 表示などはcompatibility表面としてまだ残る。
 
 旧設計書:
 
@@ -74,14 +86,14 @@ miss / deny / silence -> legacy feedback load
 ## Migration order
 
 1. **DONE** — canonical `InteractionSection / F / F' / E / unresolved H / CoverageState` を追加
-2. **DONE** — conversation eventからcanonical sectionをshadow取得し、旧Runtimeの判断を変えず観測する。same model_refの場合だけ入力F同士を比較可能
-3. **NEXT** — `xi_pool` を coverage / unresolved-input queue 等の実役割へ再分類し、runtime/API名を段階的に切替
-4. `xi_pool -> theta` の結線を切る
-5. `miss / deny / silence -> Core H` の同一視を完全に外し、canonical mismatchとの対応が成立する場合だけHへ接続
+2. **DONE** — conversation eventからcanonical sectionをshadow取得し、same model_refの場合だけ入力F同士を比較可能にする
+3. **PARTIAL** — `xi_pool` の実役割を `UnresolvedInputQueue` として分離し、新APIでは `unresolved_queue` を使用。`main.py` 内部名とCLI表示はcompatibilityとして残存
+4. **DONE** — unresolved-input queue length -> theta のlive runtime結線を切断。キュー診断量は保持
+5. **NEXT** — `miss / deny / silence` 等のlegacy feedback eventをcanonical Hと同一視しない境界をruntime上でも固定し、canonical mismatchとの対応が成立する場合だけcanonical Hへ接続
 6. leap / reconstruction判定をcanonical Hと固定θの経路へ切替
 7. 旧 `EFP / xi / H_pre/H_post` APIをcompatibility層へ閉じ込める
 
-各段階で既存CLIの挙動、session保存、LLM trust、node graph、SFO profileの回帰を維持する。
+各段階で既存CLIのsession保存、LLM trust、node graph、SFO profileの回帰を維持する。ただしStep 4以降、pre-v2.3のqueue-driven threshold挙動は意図的に互換対象から外れる。
 
 ## Test boundary
 
@@ -99,3 +111,9 @@ PYTHONPATH=rdl_bot:. python -m unittest discover -s rdl_bot/tests -p "test_*.py"
 - same frozen graph/model_refでは入力F比較ができる
 - graph snapshotが変わればfalse same-model Eを作らない
 - graph fingerprintは同じ有限状態に対して決定的
+
+`test_h_state.py` / `test_dynamics.py` はStep 4以降、次を分離して固定する。
+
+- `unresolved_input_pressure()` はキュー長のdiagnosticとして動く
+- live `xi_pressure()` は常に0で、queue lengthをthetaへ結線しない
+- explicit pressureを与えたlegacy threshold実験APIはhistorical regressionとしてのみ残る
