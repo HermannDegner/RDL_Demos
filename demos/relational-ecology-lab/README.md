@@ -241,3 +241,13 @@ coverageとH/ξの分離を固定する。
 
 繁殖を先に加えると、個体内の学習と世代間の選択を同じ結果から判別しにくい。
 次段階では、まず物理的な痕跡場、その後に繁殖、最後に外側のメタ探索を加える。
+
+
+## 実際の観測窓への接続（opt-in）
+
+`new Simulation({ seed: 2401, observeV23: true })` で、Rabbit / Predatorの
+`evaluateDecision` が作る正規化済み観測値を、reliability更新前に取得する。
+`simulation.v23Snapshot()` は個体ごとの最新比較と件数を返す。
+既定では無効であり、ブラウザUIの起動設定は変更していない。
+
+詳細・Villageとの比較と残作業は [MIGRATION_v23.md](./MIGRATION_v23.md) を参照。

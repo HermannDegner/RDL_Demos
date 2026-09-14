@@ -1,3 +1,5 @@
+import { LivingFieldObserver } from "./v23_observer.mjs";
+
 export const WORLD_WIDTH = 960;
 export const WORLD_HEIGHT = 640;
 
@@ -869,6 +871,7 @@ export class RelationalAgent {
       : rng.range(0.76, 0.88);
     this.planTimer = 0;
     this.decision = null;
+    this.v23Observer = null; // Opt-in observation only; never read by policy.
     this.lastPerception = null;
     this.leapCount = 0;
     this.leapPulse = 0;
@@ -1003,6 +1006,9 @@ export class Rabbit extends RelationalAgent {
       danger: Math.abs(observed.danger - predicted.danger),
       motion: Math.abs(observed.motion - predicted.motion),
     };
+    if (this.v23Observer) {
+      this.v23Observer.capture({ tick, observed, reliability: this.reliability });
+    }
     this.recordPredictionErrors(error, tick);
     this.xi = clamp(
       this.xi
@@ -1361,6 +1367,9 @@ export class Predator extends RelationalAgent {
         : 0,
       motion: Math.abs(observed.motion - predicted.motion),
     };
+    if (this.v23Observer) {
+      this.v23Observer.capture({ tick, observed, reliability: this.reliability });
+    }
     this.recordPredictionErrors(error, tick);
     this.xi = clamp(
       this.xi
@@ -1831,7 +1840,8 @@ export class Predator extends RelationalAgent {
 export { Predator as Threat };
 
 export class Simulation {
-  constructor({ seed = 2401, config = CONFIG } = {}) {
+  constructor({ seed = 2401, config = CONFIG, observeV23 = false } = {}) {
+    this.observeV23 = Boolean(observeV23);
     this.seed = normalizeSeed(seed);
     this.config = config;
     this.rng = new SeededRandom(this.seed);
@@ -1879,10 +1889,25 @@ export class Simulation {
     }
     this.predator = new Predator(threatPosition.x, threatPosition.y, this.rng, this.config);
     this.threat = this.predator;
+    if (this.observeV23) {
+      for (const agent of this.relationalAgents()) {
+        agent.v23Observer = new LivingFieldObserver({
+          agentRef: agent.focusKey,
+          // Unattempted attack is not observed failure. Attack comparison needs
+          // an attempt-specific boundary and is deliberately excluded here.
+          dimensions: agent.profile.errorDimensions.filter((key) => key !== "attack"),
+        });
+      }
+    }
   }
 
   relationalAgents() {
     return [...this.rabbits, this.predator];
+  }
+
+  v23Snapshot() {
+    return Object.freeze(this.relationalAgents().map((agent) =>
+      agent.v23Observer ? agent.v23Observer.snapshot() : null));
   }
 
   emitObserver(event) {
