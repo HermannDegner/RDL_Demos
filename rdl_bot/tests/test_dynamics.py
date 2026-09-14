@@ -7,7 +7,7 @@ import unittest
 
 import dynamics
 from dynamics import DynamicsConfig, load_dynamics_config
-from h_state import HState, xi_pressure
+from h_state import HState, unresolved_input_pressure
 from node_graph import Node, NodeGraph
 
 
@@ -56,7 +56,7 @@ class TestLoading(ConfigTestCase):
 
 
 class TestConfigActuallyTakesEffect(ConfigTestCase):
-    """設定が実際の動態に効くこと（宣言だけで繋がっていない、を防ぐ）。"""
+    """設定が実際の動態または診断量に効くこと。"""
 
     def test_theta_initial(self):
         dynamics.configure(DynamicsConfig(theta_initial=7.0))
@@ -81,9 +81,9 @@ class TestConfigActuallyTakesEffect(ConfigTestCase):
         h.relax_theta()
         self.assertEqual(h.theta, 2.0)
 
-    def test_xi_saturation(self):
+    def test_unresolved_input_pressure_saturation(self):
         dynamics.configure(DynamicsConfig(xi_saturation=2.0))
-        self.assertEqual(xi_pressure(["a", "b"]), 1.0)
+        self.assertEqual(unresolved_input_pressure(["a", "b"]), 1.0)
 
     def test_xi_drop_ratio(self):
         dynamics.configure(DynamicsConfig(xi_drop_ratio=0.5, xi_jitter_ratio=0.0))
