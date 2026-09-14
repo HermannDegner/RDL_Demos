@@ -56,7 +56,7 @@ restart != permission to recreate old frozen evaluator
 
 routing Fには `exact / partial / miss / candidate_confidence` に加え、有限なbot-local座標 `route:<node-id>` を保持する。同じconfidence・同じmatch classでも別nodeへrouteした場合に、誤って `E=0` としないためである。これはCore primitiveではない。
 
-## Runtimeの二経路
+## Runtimeの三入口
 
 ### default legacy CLI
 
@@ -66,7 +66,7 @@ pip install -r requirements.txt
 py main.py
 ```
 
-`main.py` の実際の修正・隔離・学習は、まだ `LegacyFeedbackLoadState` の旧経路がauthoritativeである。
+`main.py` の修正・隔離・学習は、まだ `LegacyFeedbackLoadState` の旧経路を含む。
 
 ```text
 miss / partial / exact / deny / rephrase / agree / silence
@@ -88,7 +88,7 @@ py cli_v23.py
 py cli_v23.py --seed
 ```
 
-`cli_v23.py` は既存 `main.main()` をそのまま使い、canonical観測・review・plan・explicit executeだけを追加する。user-visible response、legacy feedback、LLM trust、default legacy action authorityは維持される。
+`cli_v23.py` は既存 `main.main()` を使い、canonical観測・review・plan・explicit executeを追加する。通常turnのlegacy leap/correction authority自体は維持する。
 
 canonical stateは `data/v23_shadow_state.json` へJSON保存する。
 
@@ -103,6 +103,35 @@ last turn id
 ```
 
 frozen graph evaluator自体は保存しない。再起動後は新しい比較窓を開始し、restartを跨ぐEは形成しない。
+
+### opt-in Core v2.3 authority CLI
+
+```bash
+py cli_v23_authority.py
+py cli_v23_authority.py --seed
+```
+
+これはcontrolled cutover入口。default `main.py` を変更せず、そのprocess内だけで:
+
+```text
+legacy H-based leap / correction authority
+    -> DISABLED
+
+legacy H / theta_eff によるreinforcement量調整
+    -> DISABLED
+
+bot-local ordinary reinforcement
+    -> base_rate × local kappa
+
+canonical reconstruction mutation
+    -> explicit /v23 execute only
+```
+
+legacy feedback/load記録自体は互換・観測用に残すが、authority modeでは**再編認可にも通常reinforcement量にも使わない**。
+
+これは「すべてのgraph更新をcanonical Hだけで行う」という意味ではない。通常のrouting、usage、LLM trust、feedback由来のbot-local適応、maintenanceはアプリケーション動作として残る。切り替えているのは、**構造再編のauthority**と、旧H/θに依存していたreinforcement scalingである。
+
+## `/v23` commands
 
 ### `/v23`
 
@@ -166,11 +195,12 @@ LLM revision generation
 - `migration_session_v23.py` — pending/review/one-shot execution auditを持つsession
 - `persistence_v23.py` — canonical H / review / executionのrestart durability
 - `cli_v23.py` — opt-in reviewed CLI入口
+- `cli_v23_authority.py` — opt-in canonical reconstruction-authority cutover入口
 - `parallel_v23.py` — legacy/canonical判定をaction非介入で比較
 - `local_state.py` — `UnresolvedInputQueue` 等bot-local状態の現行名
 - `candidate_v23.py` — Step 4時点のthreshold-neutral compatibility adapter
 
-canonical explicit execution pathは実装済みだが、**default `main.py` のmutation authorityにはまだ切り替えていない**。
+canonical explicit executionとopt-in authority cutoverは実装済みだが、**default `main.py` のauthorityはまだ切り替えていない**。
 
 ## CLIコマンド
 
@@ -187,11 +217,11 @@ canonical explicit execution pathは実装済みだが、**default `main.py` の
 | `/xipool` | unresolved input queue のhistorical alias表示 |
 | `/graph` | ノードグラフ統計 |
 | `/hot` | legacy feedback/loadの高いノード表示 |
-| `/v23` | **cli_v23のみ**。canonical read-only診断 |
+| `/v23` | `cli_v23*`のみ。canonical read-only診断 |
 | `/v23 resolve <reason>` | explicit resolved review |
 | `/v23 unresolved <reason>` | explicit unresolved review → canonical H |
 | `/v23 plan` | canonical target planning dry-run |
-| `/v23 execute` | explicit canonical one-shot mutation試行 |
+| `/v23 execute` | explicit canonical one-shot reconstruction mutation試行 |
 | `/quit` | 保存して終了 |
 | `y / n / ?` | 直前応答へのlegacy feedback入力 |
 
@@ -228,6 +258,8 @@ v2.3側では少なくとも次を固定している。
 - successful executionは同reviewでone-shot
 - execution auditはrestart後も保持される
 - frozen evaluatorを再起動後に捏造せず、cross-restart Eを作らない
+- authority modeではlegacy leap/correctionを実 `respond()` 経路でも発火させない
+- authority modeのlocal reinforcement量はlegacy H / theta_eff / queue pressureに依存しない
 
 ## 形成史
 
