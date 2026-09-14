@@ -7,8 +7,9 @@ reconstruction automatically.
 
 Non-zero E becomes ``pending-review`` only.  A pending record can be explicitly
 reviewed as either resolved or unresolved with provenance.  Only an unresolved
-review updates canonical H.  Mutation remains a separate explicit call through
-the candidate pipeline.
+review updates canonical H.  A reviewed unresolved observation can then be
+planned in dry-run mode without mutating the graph.  Mutation remains a separate
+explicit call through the candidate pipeline.
 """
 
 from __future__ import annotations
@@ -17,17 +18,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 try:  # package-style imports
+    from .action_gate_v23 import ReconstructionRequest
     from .authority_v23 import AuthorityObservation, CanonicalLeapAuthority
     from .canonical_runtime_v23 import CanonicalRuntimeController, RuntimeAssessmentRecord
     from .pipeline_v23 import CanonicalPipelineResult, CanonicalReconstructionPipeline
     from .resolution_v23 import ResolutionAssessment
     from .runtime_v23 import V23ConversationShadow, respond_with_shadow
+    from .target_planner_v23 import ReconstructionTargetPlan
 except ImportError:  # historical ``PYTHONPATH=rdl_bot:.`` execution
+    from action_gate_v23 import ReconstructionRequest  # type: ignore
     from authority_v23 import AuthorityObservation, CanonicalLeapAuthority  # type: ignore
     from canonical_runtime_v23 import CanonicalRuntimeController, RuntimeAssessmentRecord  # type: ignore
     from pipeline_v23 import CanonicalPipelineResult, CanonicalReconstructionPipeline  # type: ignore
     from resolution_v23 import ResolutionAssessment  # type: ignore
     from runtime_v23 import V23ConversationShadow, respond_with_shadow  # type: ignore
+    from target_planner_v23 import ReconstructionTargetPlan  # type: ignore
 
 
 def _merged_refs(*groups: tuple[str, ...]) -> tuple[str, ...]:
@@ -47,10 +52,18 @@ class SessionReview:
     earlier_index: int
     later_index: int
     assessment: ResolutionAssessment
+    authority_observation: Optional[AuthorityObservation] = None
 
     @property
     def disposition(self) -> str:
         return "unresolved" if self.assessment.unresolved else "resolved"
+
+
+@dataclass(frozen=True)
+class SessionPlanPreview:
+    status: str
+    request: Optional[ReconstructionRequest] = None
+    plan: Optional[ReconstructionTargetPlan] = None
 
 
 @dataclass
@@ -172,9 +185,39 @@ class CanonicalMigrationSession:
             evidence_refs=evidence_refs,
         )
         self.reviews.append(
-            SessionReview(record.earlier_index, record.later_index, observation.assessment)
+            SessionReview(
+                record.earlier_index,
+                record.later_index,
+                observation.assessment,
+                authority_observation=observation,
+            )
         )
         return observation
+
+    def preview_latest_reconstruction(self) -> SessionPlanPreview:
+        """Dry-run the latest unresolved review through gate + target planner only."""
+
+        review = next(
+            (
+                item
+                for item in reversed(self.reviews)
+                if item.disposition == "unresolved" and item.authority_observation is not None
+            ),
+            None,
+        )
+        if review is None:
+            return SessionPlanPreview(status="no-unresolved-review")
+
+        request = self.pipeline.gate.request(review.authority_observation)
+        if request is None:
+            return SessionPlanPreview(status="below-reconstruction-threshold")
+
+        plan = self.pipeline.planner.plan(request, shadow=self.shadow)
+        return SessionPlanPreview(
+            status=plan.status,
+            request=request,
+            plan=plan,
+        )
 
     def review_and_execute(
         self,
