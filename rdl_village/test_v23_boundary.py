@@ -1,5 +1,8 @@
+import random
 import unittest
 
+from .dialogue import RelationalDialogueSystem
+from . import dialogue_local_aliases as _dialogue_local_aliases  # noqa: F401
 from .v23_boundary import (
     ExplorationState,
     VillageBoundary,
@@ -102,6 +105,14 @@ class VillageV23BoundaryTests(unittest.TestCase):
         self.assertEqual(len(exploration.unresolved), 1)
         self.assertEqual(h.magnitude, 0.0)
         self.assertFalse(hasattr(exploration, "xi"))
+
+    def test_dialogue_unresolved_queue_is_demo_local_alias_not_core_xi(self):
+        system = RelationalDialogueSystem(object(), random.Random(0))
+        self.assertIs(system.unresolved_dialogue_queue, system.xi_pool)
+
+        system.unresolved_dialogue_queue.append(("ask", "unknown-topic"))
+        self.assertEqual(system.xi_pool, [("ask", "unknown-topic")])
+        self.assertFalse(hasattr(system.unresolved_dialogue_queue, "xi"))
 
 
 if __name__ == "__main__":
