@@ -32,7 +32,9 @@ targetless request
    ↓ canonical evidence target planning
 unique target only
    ↓
-injected mutation boundary
+explicit canonical execute
+   ↓
+LLM revision mutation adapter
 ```
 
 守る境界:
@@ -49,6 +51,7 @@ queue length does not change canonical θ
 nonzero E != unresolved by magnitude alone
 canonical reconstruction eligibility != target selection
 canonical target selection != legacy hot-node selection
+restart != permission to recreate old frozen evaluator
 ```
 
 routing Fには `exact / partial / miss / candidate_confidence` に加え、有限なbot-local座標 `route:<node-id>` を保持する。同じconfidence・同じmatch classでも別nodeへrouteした場合に、誤って `E=0` としないためである。これはCore primitiveではない。
@@ -78,44 +81,79 @@ miss / partial / exact / deny / rephrase / agree / silence
 
 旧 `xi_pool -> theta` 結線はlive runtimeから既に切断済み。未解決入力キューは保存・後続再評価には使うが、その件数はleap閾値を動かさない。
 
-### opt-in Core v2.3 shadow CLI
+### opt-in Core v2.3 reviewed CLI
 
 ```bash
 py cli_v23.py
-```
-
-seed生成も併用できる。
-
-```bash
 py cli_v23.py --seed
 ```
 
-`cli_v23.py` は既存 `main.main()` をそのまま使い、`respond` 呼出だけを `CanonicalMigrationSession` で包む。したがってuser-visible response、legacy feedback、session保存、LLM trust、legacy action authorityはdefault CLIと同じである。
+`cli_v23.py` は既存 `main.main()` をそのまま使い、canonical観測・review・plan・explicit executeだけを追加する。user-visible response、legacy feedback、LLM trust、default legacy action authorityは維持される。
 
-同時に隣接turnをcanonical経路で観測し、非ゼロEを `pending-review` として保存する。ただしshadow CLIは **自動review・自動H更新・自動mutationを行わない**。
+canonical stateは `data/v23_shadow_state.json` へJSON保存する。
 
-read-only診断:
+保存対象:
 
 ```text
-/v23
+canonical H snapshot
+pending / assessment
+review audit
+execution audit
+last turn id
 ```
+
+frozen graph evaluator自体は保存しない。再起動後は新しい比較窓を開始し、restartを跨ぐEは形成しない。
+
+### `/v23`
+
+read-only診断。
 
 表示内容:
 
-- 観測turn数
-- assessment数
-- pending-review件数
+- current process windowのturn数
+- last turn id
+- assessment / pending / review / execution件数
 - canonical H magnitude
 - fixed θ
 - reconstruction eligibility
-- 最新pendingのmismatch理由とevidence refs
+- 最新pending / review / execution
 
-`/v23` 自体は状態を変更しない。
+### `/v23 resolve <reason>`
 
-## canonical candidate modules
+最新pendingをresolvedとして閉じる。canonical Hは増えず、node graphも変更しない。
+
+### `/v23 unresolved <reason>`
+
+最新pendingをunresolvedとしてcanonical Hへ入れる。これはexplicit reviewであり、legacy `deny / miss / silence` から自動生成しない。
+
+### `/v23 plan`
+
+最新unresolved reviewのgate + target planningをdry-runする。node graphは変更しない。
+
+### `/v23 execute`
+
+最新unresolved reviewがfixed θ以上で、canonical evidenceからunique targetが得られた場合に限り、explicitにmutation adapterを呼ぶ。
+
+```text
+reviewed canonical H >= θ
+        ↓
+canonical target plan = unique
+        ↓
+/v23 execute
+        ↓
+LLM revision generation
+        ├─ unavailable / failed -> no mutation
+        └─ success
+             old node -> deprecated
+             new node -> added + relation
+```
+
+この経路はlegacy H / hot-nodeを参照しない。同じreviewでmutation成功後はone-shotとなり、再起動後もexecution auditにより二重実行しない。LLM off等で無変更だった試行は、後で明示的に再試行できる。
+
+## canonical modules
 
 - `v23_state.py` — `InteractionSection / F / F' / E / UnresolvedMismatchState / CoverageState`
-- `runtime_v23.py` — finite section取得、pre-update evaluator凍結、later section replay
+- `runtime_v23.py` — finite section取得、pre-update evaluator凍結、later section replay、restart-safe turn id
 - `resolution_v23.py` — provenance付き `ResolutionAssessment`
 - `assessment_policy_v23.py` — zero→resolved / nonzero→pending の保守的形成規則
 - `authority_v23.py` — canonical H + fixed θだけを見る `CanonicalLeapAuthority`
@@ -123,14 +161,16 @@ read-only診断:
 - `action_gate_v23.py` — targetless `ReconstructionRequest`
 - `target_planner_v23.py` — canonical turn evidenceだけからtarget候補を計画
 - `executor_v23.py` — unique targetだけをinjected mutation callbackへ渡す境界
+- `mutation_v23.py` — canonical targetに対するLLM revision mutation adapter
 - `pipeline_v23.py` — explicit review後のend-to-end candidate pipeline
-- `migration_session_v23.py` — legacy応答を変えずpendingを蓄積するsession
-- `cli_v23.py` — opt-in shadow CLI入口とread-only `/v23`
+- `migration_session_v23.py` — pending/review/one-shot execution auditを持つsession
+- `persistence_v23.py` — canonical H / review / executionのrestart durability
+- `cli_v23.py` — opt-in reviewed CLI入口
 - `parallel_v23.py` — legacy/canonical判定をaction非介入で比較
 - `local_state.py` — `UnresolvedInputQueue` 等bot-local状態の現行名
 - `candidate_v23.py` — Step 4時点のthreshold-neutral compatibility adapter
 
-canonical candidate pathはexecutor境界まで実装されているが、**default CLIのmutation authorityにはまだ切り替えていない**。
+canonical explicit execution pathは実装済みだが、**default `main.py` のmutation authorityにはまだ切り替えていない**。
 
 ## CLIコマンド
 
@@ -147,7 +187,11 @@ canonical candidate pathはexecutor境界まで実装されているが、**defa
 | `/xipool` | unresolved input queue のhistorical alias表示 |
 | `/graph` | ノードグラフ統計 |
 | `/hot` | legacy feedback/loadの高いノード表示 |
-| `/v23` | **shadow CLIのみ**。canonical read-only診断 |
+| `/v23` | **cli_v23のみ**。canonical read-only診断 |
+| `/v23 resolve <reason>` | explicit resolved review |
+| `/v23 unresolved <reason>` | explicit unresolved review → canonical H |
+| `/v23 plan` | canonical target planning dry-run |
+| `/v23 execute` | explicit canonical one-shot mutation試行 |
 | `/quit` | 保存して終了 |
 | `y / n / ?` | 直前応答へのlegacy feedback入力 |
 
@@ -179,8 +223,11 @@ v2.3側では少なくとも次を固定している。
 - reconstruction eligibilityとtarget selectionを分離
 - target plannerはlegacy hot-nodeを参照しない
 - ambiguous/missing targetはexecutorへ進まない
-- end-to-end pipelineはexplicit reviewなしではmutationへ到達しない
-- shadow CLIはlegacy応答を変えず、`/v23` はread-only
+- `/v23 execute` はexplicit review済みunique target以外を変更しない
+- LLM unavailable / revision失敗ではnode graphを変更しない
+- successful executionは同reviewでone-shot
+- execution auditはrestart後も保持される
+- frozen evaluatorを再起動後に捏造せず、cross-restart Eを作らない
 
 ## 形成史
 
