@@ -1,10 +1,19 @@
 # RDL Living Field
 
 既存の生態系デモで段階的に導入した知覚制約、複合資源、固定地形、
-資源転移、`H_vec` を、RabbitとPredatorが互いを環境として学ぶ更新系へ統合した
+資源転移、局所的な予測負荷を、RabbitとPredatorが互いを環境として学ぶ更新系へ統合した
 ブラウザ実験。
 
 [デモを開く](./index.html)
+
+> **Core v2.3 migration status**
+>
+> このデモの生態系挙動は継続利用するが、既存runtimeの `H` / `H_vec` / `xi` /
+> `thetaEffective` は **Core v2.3 の H / ξ / θ と同一ではない**。それらは
+> pre-v2.3由来のデモ固有状態・ローカル制御則として段階的に改名・分離する。
+> 現行Coreの正規比較境界は [`v23_state.mjs`](./v23_state.mjs) にあり、
+> `RIB_B → F/F' → E = Δ(F,F') → unresolved H` を別経路で保持する。
+> Core ξはruntime scalarとして実装しない。
 
 ## 設計原則
 
@@ -49,8 +58,9 @@ seedごとに7個の岩を固定配置する。岩はRabbitとPredatorの両方�
 ~~~
 
 旧デモのように枯渇フレームで即時転送せず、休眠期間を置く。
-そのため、個体の古い資源記憶と現在の視界が食い違う時間が生まれ、
-その不一致が `ξ` と資源誤差へ因果的に接続される。
+そのため、個体の古い資源記憶と現在の視界が食い違う時間が生まれる。
+この不一致は現在のruntimeでは資源予測差とデモ固有の適応圧へ接続されるが、
+その適応圧をCore ξとはみなさない。
 
 ### 5. 捕食を一回の行動にする
 
@@ -76,8 +86,10 @@ RelationalAgent
 └─ Predator + PredatorProfile
 ~~~
 
-`RelationalAgent`は連続位置、個体記憶、予測、信頼度、`H_vec`、`ξ`、Leap、因果ログを
-共通に持つ。Profileは身体半径、視界、計画間隔、誤差次元、表示する内部状態を定める。
+`RelationalAgent`は連続位置、個体記憶、予測、信頼度、ローカル予測負荷、
+デモ固有の適応圧、Leap、因果ログを共通に持つ。現在コード上には歴史的な
+`H` / `xi` フィールド名が残るが、Core v2.3のH / ξとは同一視しない。
+Profileは身体半径、視界、計画間隔、誤差次元、表示する内部状態を定める。
 共通なのは更新文法であり、種ごとの価値勾配まで同一にはしない。
 
 | 種 | 予測誤差の次元 | 主な価値勾配 |
@@ -115,7 +127,7 @@ V_pred(a) = preyReliability × memoryWeight × w_prey F_prey
           + seededNoise
 ~~~
 
-## 予測差、H_vec、Leap
+## 予測差とローカルLeap（pre-v2.3互換経路）
 
 意思決定ごとに三つの値を予測し、次の計画時に実測との差を取る。
 
@@ -133,13 +145,16 @@ Predatorは別の三次元を使う。
 | `attack` | 捕食行動を開始した場合の成立予測と、捕食／離脱／空振りの結果 |
 | `motion` | 期待追跡量に対する実移動量。地形衝突と停滞を含む |
 
+現在のシミュレーション挙動を保つローカル制御則は次である。
+これは **Core v2.3のE/H/ξ/θの定義式ではない**。
+
 ~~~text
-E_i(t) = abs(observed_i(t) - predicted_i(t))
-H_i(t) = decay_i × H_i(t-1) + gain_i × E_i(t)
-theta_effective = clamp(theta_base - 0.26 × ξ)
+local_error_i(t) = abs(observed_i(t) - predicted_i(t))
+local_load_i(t)  = decay_i × local_load_i(t-1) + gain_i × local_error_i(t)
+local_leap_threshold = clamp(theta_base - 0.26 × adaptation_pressure)
 ~~~
 
-`max(H_vec) >= theta_effective` になると、最大成分に応じてLeapする。
+`max(local_load) >= local_leap_threshold` になると、最大成分に応じてローカルLeapする。
 
 - Rabbitの`resource`: 古い食・水記憶を弱め、未訪問方向の価値を上げる。
 - Rabbitの`danger`: 音への慎重さと安全距離を増やす。
@@ -147,23 +162,48 @@ theta_effective = clamp(theta_base - 0.26 × ξ)
 - Predatorの`attack`: 突進開始距離と獲物の先読み時間を変える。
 - 両者の`motion`: 停滞地点や地形のコストを上げ、進行角を組み替える。
 
-Leap後は `H_vec` を完全消去せず28%残す。これは構造変更後も履歴がゼロには
-ならないという前提。
+Leap後はローカル負荷を完全消去せず28%残す。この28%はデモ固有の継続挙動であり、
+Core Hの一般法則としては扱わない。
+
+### Core v2.3 canonical sidecar
+
+現行Coreとの接続は別に次の順序を固定している。
+
+~~~text
+raw interaction(s)
+  ↓ Purpose / B
+RIB_B(t)
+  ↓ same pre-update M_B
+F(t)
+
+later interaction(s)
+  ↓ same Purpose / B
+RIB_B(t+Δ)
+  ↓ same pre-update M_B
+F'(t+Δ)
+  ↓
+E = Δ(F, F')
+  ↓ unresolved component only
+H
+~~~
+
+`coverage / unknown relation / exploration pressure` はHとは別状態であり、
+それらをCore ξへ数値化しない。
 
 ## 1 tick の更新順
 
 1. 休眠資源の時計を進め、必要なら別地点で再生する。
-2. Predatorが前回予測を評価し、知覚、記憶統合、Leap、行動選択を行う。
+2. Predatorが前回予測を評価し、知覚、記憶統合、ローカルLeap、行動選択を行う。
 3. 捕食行動の接触を一度だけ解決する。RabbitとPredatorの双方が結果を保持する。
 4. 各Rabbitへ、地形を含む視覚と音の知覚結果を渡す。
-5. 計画tickなら前回予測を評価し、記憶統合、Leap判定、次行動選択を行う。
+5. 計画tickなら前回予測を評価し、記憶統合、ローカルLeap判定、次行動選択を行う。
 6. Rabbitを連続空間で移動し、閉境界と岩の衝突を解決する。
 7. 資源との接触、摂取、休息、地形抵抗を適用する。
 8. 生存限界を判定する。
 9. 観測者専用メトリクスを読み出せる状態にする。
 
 観察対象はRabbitだけでなくPredatorも選択できる。Predatorを選ぶと、獲物記憶、
-探索履歴、`prey / attack / motion`の`H_vec`、捕食者自身の因果ログを表示する。
+探索履歴、`prey / attack / motion`のローカル負荷、捕食者自身の因果ログを表示する。
 
 ## 再現
 
@@ -180,15 +220,21 @@ URLの `seed` クエリで初期乱数系列を固定できる。
 リポジトリルートで実行する。
 
 ~~~bash
-node --test tests/relational-ecology-lab.test.mjs
+node --test tests/relational-ecology-lab.test.mjs tests/relational-ecology-lab-v23.test.mjs
 ~~~
 
-決定論、非共有記憶、共通`RelationalAgent`型、Predatorの限定知覚と獲物記憶、
-捕食失敗からのLeap、休眠からの別地点再生、閉境界、地形遮蔽、壁沿い移動、
-捕食と岩の衝突、資源配置除外、観測読み出しの非介入を検証する。
+既存テストは決定論、非共有記憶、共通`RelationalAgent`型、Predatorの限定知覚と
+獲物記憶、捕食失敗からのローカルLeap、休眠からの別地点再生、閉境界、地形遮蔽、
+壁沿い移動、捕食と岩の衝突、資源配置除外、観測読み出しの非介入を検証する。
+
+`relational-ecology-lab-v23.test.mjs` は、raw observationとRIB_Bの分離、同じ
+pre-update `M_B` でのF/F'形成、`E = Δ(F,F')`、resolved mismatchのH非流入、
+coverageとH/ξの分離を固定する。
 
 ## 意図的に次段階へ残したもの
 
+- `core.mjs` / `app.mjs` 内の歴史的な `H` / `xi` / `thetaEffective` 名を、
+  `localLoad` / `adaptationPressure` / `localLeapThreshold` へ挙動不変で移行すること
 - 繁殖と遺伝
 - 匂い・痕跡による個体間の間接情報共有
 - エピソード外側でのパラメータ探索
