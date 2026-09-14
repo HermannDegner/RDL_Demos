@@ -14,7 +14,11 @@ remains authoritative while canonical v2.3 state is observed beside it.
 - ``/v23`` is read-only diagnostics;
 - ``/v23 resolve ...`` / ``/v23 unresolved ...`` are explicit reviews;
 - ``/v23 plan`` is a dry-run reconstruction/target preview;
-- no v2.3 command in this module mutates the node graph.
+- no v2.3 command in this module mutates the node graph;
+- canonical review/H state is persisted, but frozen evaluators are not.
+
+After restart a fresh comparison window begins at the next monotonic turn id.
+No cross-restart E is manufactured from a recreated evaluator.
 """
 
 from __future__ import annotations
@@ -23,8 +27,13 @@ from typing import Any, Callable
 
 try:
     from .migration_session_v23 import CanonicalMigrationSession
+    from .persistence_v23 import load_session, save_session
 except ImportError:
     from migration_session_v23 import CanonicalMigrationSession  # type: ignore
+    from persistence_v23 import load_session, save_session  # type: ignore
+
+
+V23_SESSION_STATE_PATH = "data/v23_shadow_state.json"
 
 
 def _print_shadow_status(session: CanonicalMigrationSession) -> None:
@@ -32,8 +41,8 @@ def _print_shadow_status(session: CanonicalMigrationSession) -> None:
     pending = session.pending_records
     print("  v2.3 shadow status:")
     print(
-        f"    turns={len(session.shadow.turns)} assessments={len(session.assessments)} "
-        f"pending={len(pending)} reviews={len(session.reviews)}"
+        f"    turns_in_window={len(session.shadow.turns)} last_turn_id={session.shadow.last_assigned_index} "
+        f"assessments={len(session.assessments)} pending={len(pending)} reviews={len(session.reviews)}"
     )
     print(
         f"    canonical_H={authority.h_magnitude:.3f} "
@@ -146,17 +155,28 @@ def install_shadow_session(
     legacy_main: Any,
     *,
     session: CanonicalMigrationSession | None = None,
+    state_path: str | None = None,
 ) -> CanonicalMigrationSession:
-    """Wrap legacy response/command hooks with opt-in canonical observation."""
+    """Wrap legacy response/command hooks with opt-in canonical observation.
+
+    When ``state_path`` is supplied, canonical review/H state is loaded once and
+    atomically saved after every observed turn and every ``/v23`` command.
+    Frozen evaluators are never persisted; restored sessions start a fresh
+    comparison window at the next turn id.
+    """
 
     if session is None:
-        session = CanonicalMigrationSession()
+        session = load_session(state_path) if state_path else CanonicalMigrationSession()
 
     original_respond: Callable[..., tuple[str, str]] = legacy_main.respond
     original_handle_command: Callable[..., bool] | None = getattr(legacy_main, "handle_command", None)
 
+    def persist() -> None:
+        if state_path:
+            save_session(state_path, session)
+
     def shadowed_respond(user_input, graph, h, llm, sfo_profile, unresolved_queue, llm_trust):
-        return session.respond(
+        result = session.respond(
             user_input,
             graph,
             h,
@@ -166,12 +186,15 @@ def install_shadow_session(
             llm_trust,
             legacy_respond=original_respond,
         )
+        persist()
+        return result
 
     legacy_main.respond = shadowed_respond
 
     if original_handle_command is not None:
         def shadowed_handle_command(cmd, *args, **kwargs):
             if _handle_v23_command(cmd, session):
+                persist()
                 return True
             return original_handle_command(cmd, *args, **kwargs)
 
@@ -186,11 +209,18 @@ def main() -> None:
     except ImportError:
         import main as legacy_main  # type: ignore
 
-    install_shadow_session(legacy_main)
+    session = install_shadow_session(legacy_main, state_path=V23_SESSION_STATE_PATH)
     print("  [v2.3 shadow] canonical comparison enabled; legacy graph-mutation authority unchanged")
     print("  [v2.3 shadow] non-zero canonical E is pending until explicit /v23 review")
     print("  [v2.3 shadow] /v23 plan is dry-run only; v2.3 commands never mutate the graph")
-    legacy_main.main()
+    print(
+        f"  [v2.3 shadow] durable canonical state: last_turn_id={session.shadow.last_assigned_index} "
+        f"pending={len(session.pending_records)} reviews={len(session.reviews)}"
+    )
+    try:
+        legacy_main.main()
+    finally:
+        save_session(V23_SESSION_STATE_PATH, session)
 
 
 if __name__ == "__main__":
