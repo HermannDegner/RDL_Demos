@@ -18,6 +18,55 @@ function maxMagnitude(values = {}) {
   return Math.max(0, ...Object.values(values).map((value) => Math.abs(Number(value) || 0)));
 }
 
+// Demo-local audit contract mirroring the current bounded reliability updater.
+// It is not a Core constant and must not be read as canonical absorption law.
+const LOCAL_RELIABILITY_RATE = 0.035;
+const LOCAL_RELIABILITY_MIN = 0.18;
+const LOCAL_RELIABILITY_MAX = 0.98;
+const LOCAL_UPDATE_EPSILON = 1e-12;
+
+function localReliabilityEnvelope(value) {
+  return Object.freeze({
+    minimum: Math.max(
+      LOCAL_RELIABILITY_MIN,
+      value + (0 - value) * LOCAL_RELIABILITY_RATE,
+    ),
+    maximum: Math.min(
+      LOCAL_RELIABILITY_MAX,
+      value + (1 - value) * LOCAL_RELIABILITY_RATE,
+    ),
+  });
+}
+
+export class LocalAbsorptionAttemptEvidence {
+  constructor({
+    status,
+    beforeCoefficients = null,
+    afterCoefficients = null,
+    deltas = null,
+    changedDimensions = [],
+    confoundedDimensions = [],
+    captureTick = null,
+    planTick = null,
+    provenance = null,
+  }) {
+    this.status = status;
+    this.beforeCoefficients = beforeCoefficients ? frozenObject(beforeCoefficients) : null;
+    this.afterCoefficients = afterCoefficients ? frozenObject(afterCoefficients) : null;
+    this.deltas = deltas ? frozenObject(deltas) : null;
+    this.changedDimensions = Object.freeze([...changedDimensions]);
+    this.confoundedDimensions = Object.freeze([...confoundedDimensions]);
+    this.captureTick = captureTick;
+    this.planTick = planTick;
+    this.provenance = provenance ? frozenObject(provenance) : null;
+    Object.freeze(this);
+  }
+
+  get qualifiesAsFiniteAttempt() {
+    return this.status === "bounded-local-adjustment-observed";
+  }
+}
+
 export class PredictionAssessmentEvidence {
   constructor({
     status,
@@ -29,6 +78,7 @@ export class PredictionAssessmentEvidence {
     weightedObserved = null,
     residual = null,
     missingDimensions = [],
+    localAbsorptionAttempt = null,
     provenance = null,
   }) {
     this.status = status;
@@ -40,6 +90,7 @@ export class PredictionAssessmentEvidence {
     this.weightedObserved = weightedObserved ? frozenObject(weightedObserved) : null;
     this.residual = residual ? frozenObject(residual) : null;
     this.missingDimensions = Object.freeze([...missingDimensions]);
+    this.localAbsorptionAttempt = localAbsorptionAttempt ?? null;
     this.provenance = provenance ? frozenObject(provenance) : null;
     Object.freeze(this);
   }
@@ -51,6 +102,10 @@ export class PredictionAssessmentEvidence {
   get resolvesObservedDifference() {
     return this.status === "prediction-matched-observation";
   }
+
+  get residualAfterFiniteAbsorptionAttempt() {
+    return this.status === "prediction-residual-after-bounded-local-adjustment";
+  }
 }
 
 export class LivingFieldObserver {
@@ -59,6 +114,7 @@ export class LivingFieldObserver {
     this.dimensions = Object.freeze([...dimensions]);
     this.previous = null;
     this.predictionWindow = null;
+    this.localUpdateBaseline = null;
     this.latest = null;
     this.samples = 0;
     this.comparisons = 0;
@@ -66,9 +122,89 @@ export class LivingFieldObserver {
     this.assessmentCounts = {};
     this.predictionChecks = 0;
     this.predictionEvidenceCounts = {};
+    this.localUpdateChecks = 0;
+    this.localAbsorptionAttempts = 0;
+    this.localUpdateEvidenceCounts = {};
+  }
+
+  inspectLocalUpdateTransition({ tick, reliability }) {
+    const baseline = this.localUpdateBaseline;
+    this.localUpdateBaseline = null;
+    if (!baseline) return null;
+
+    const missingDimensions = this.dimensions.filter(
+      (key) => !Number.isFinite(baseline.coefficients?.[key]) || !Number.isFinite(reliability?.[key]),
+    );
+    if (missingDimensions.length > 0) {
+      const evidence = new LocalAbsorptionAttemptEvidence({
+        status: "not-formed-missing-local-coefficient",
+        beforeCoefficients: baseline.coefficients,
+        captureTick: baseline.tick,
+        planTick: tick,
+        confoundedDimensions: missingDimensions,
+        provenance: {
+          source: "reliability-transition-audit",
+          agentRef: this.agentRef,
+          auditContract: "bounded-reliability-step-v1",
+        },
+      });
+      this.recordLocalUpdateEvidence(evidence);
+      return evidence;
+    }
+
+    const afterCoefficients = Object.fromEntries(
+      this.dimensions.map((key) => [key, reliability[key]]),
+    );
+    const deltas = {};
+    const changedDimensions = [];
+    const confoundedDimensions = [];
+    for (const key of this.dimensions) {
+      const before = baseline.coefficients[key];
+      const after = afterCoefficients[key];
+      const delta = after - before;
+      deltas[key] = delta;
+      if (Math.abs(delta) > LOCAL_UPDATE_EPSILON) changedDimensions.push(key);
+      const envelope = localReliabilityEnvelope(before);
+      if (
+        after < envelope.minimum - LOCAL_UPDATE_EPSILON
+        || after > envelope.maximum + LOCAL_UPDATE_EPSILON
+      ) {
+        confoundedDimensions.push(key);
+      }
+    }
+
+    let status = "no-observed-local-adjustment";
+    if (confoundedDimensions.length > 0) status = "confounded-structural-change";
+    else if (changedDimensions.length > 0) status = "bounded-local-adjustment-observed";
+
+    const evidence = new LocalAbsorptionAttemptEvidence({
+      status,
+      beforeCoefficients: baseline.coefficients,
+      afterCoefficients,
+      deltas,
+      changedDimensions,
+      confoundedDimensions,
+      captureTick: baseline.tick,
+      planTick: tick,
+      provenance: {
+        source: "reliability-transition-audit",
+        agentRef: this.agentRef,
+        auditContract: "bounded-reliability-step-v1",
+      },
+    });
+    this.recordLocalUpdateEvidence(evidence);
+    return evidence;
+  }
+
+  recordLocalUpdateEvidence(evidence) {
+    this.localUpdateChecks += 1;
+    this.localUpdateEvidenceCounts[evidence.status] =
+      (this.localUpdateEvidenceCounts[evidence.status] ?? 0) + 1;
+    if (evidence.qualifiesAsFiniteAttempt) this.localAbsorptionAttempts += 1;
   }
 
   beginPredictionWindow({ tick, prediction, reliability }) {
+    const localAbsorptionAttempt = this.inspectLocalUpdateTransition({ tick, reliability });
     const missingDimensions = this.dimensions.filter(
       (key) => !Number.isFinite(prediction?.[key]) || !Number.isFinite(reliability?.[key]),
     );
@@ -77,6 +213,7 @@ export class LivingFieldObserver {
         status: "not-formed-missing-prediction",
         tick,
         missingDimensions: Object.freeze([...missingDimensions]),
+        localAbsorptionAttempt,
       });
       return this.predictionWindow;
     }
@@ -93,6 +230,7 @@ export class LivingFieldObserver {
       prediction: frozenObject(copiedPrediction),
       coefficients: frozenObject(copiedCoefficients),
       modelRef: `${this.agentRef}:prediction-window:${tick}`,
+      localAbsorptionAttempt,
     });
     return this.predictionWindow;
   }
@@ -107,6 +245,7 @@ export class LivingFieldObserver {
         status: window.status,
         modelRef: null,
         missingDimensions: window.missingDimensions,
+        localAbsorptionAttempt: window.localAbsorptionAttempt,
         provenance: {
           source: "decision.prediction-reacquired",
           agentRef: this.agentRef,
@@ -128,6 +267,7 @@ export class LivingFieldObserver {
         prediction: window.prediction,
         coefficients: window.coefficients,
         missingDimensions,
+        localAbsorptionAttempt: window.localAbsorptionAttempt,
         provenance: {
           source: "decision.prediction-reacquired",
           agentRef: this.agentRef,
@@ -149,9 +289,12 @@ export class LivingFieldObserver {
       weightedObserved[key] = observed[key] * window.coefficients[key];
       residual[key] = Math.abs(weightedObserved[key] - weightedPrediction[key]);
     }
-    const status = maxMagnitude(residual) === 0
-      ? "prediction-matched-observation"
-      : "prediction-residual-present";
+    let status = "prediction-residual-present";
+    if (maxMagnitude(residual) === 0) {
+      status = "prediction-matched-observation";
+    } else if (window.localAbsorptionAttempt?.qualifiesAsFiniteAttempt) {
+      status = "prediction-residual-after-bounded-local-adjustment";
+    }
     const evidence = new PredictionAssessmentEvidence({
       status,
       modelRef: window.modelRef,
@@ -161,6 +304,7 @@ export class LivingFieldObserver {
       weightedPrediction,
       weightedObserved,
       residual,
+      localAbsorptionAttempt: window.localAbsorptionAttempt,
       provenance: {
         source: "decision.prediction-reacquired",
         agentRef: this.agentRef,
@@ -181,6 +325,7 @@ export class LivingFieldObserver {
       if (!Number.isFinite(observed[key]) || !Number.isFinite(reliability[key])) {
         this.missing += 1;
         this.previous = null; // Do not bridge an unobserved window.
+        this.localUpdateBaseline = null;
         const predictionEvidence = this.inspectPredictionWindow({ tick, observed });
         this.latest = Object.freeze({
           status: "not-formed-missing-observation",
@@ -255,6 +400,11 @@ export class LivingFieldObserver {
       });
     }
     this.previous = Object.freeze({ section, coefficients: frozenCoefficients, modelRef });
+    this.localUpdateBaseline = Object.freeze({
+      tick,
+      coefficients: frozenCoefficients,
+      modelRef,
+    });
     return this.latest;
   }
 
@@ -268,6 +418,9 @@ export class LivingFieldObserver {
       assessmentCounts: Object.freeze({ ...this.assessmentCounts }),
       predictionChecks: this.predictionChecks,
       predictionEvidenceCounts: Object.freeze({ ...this.predictionEvidenceCounts }),
+      localUpdateChecks: this.localUpdateChecks,
+      localAbsorptionAttempts: this.localAbsorptionAttempts,
+      localUpdateEvidenceCounts: Object.freeze({ ...this.localUpdateEvidenceCounts }),
       latest: this.latest,
     });
   }
