@@ -26,15 +26,27 @@ test("actual Rabbit and Predator windows are observed without changing seeded ev
     assert.ok(snapshots.some((entry) => entry.agentRef.startsWith("rabbit:") && entry.comparisons > 0));
     assert.ok(snapshots.some((entry) => entry.agentRef.startsWith("predator:") && entry.comparisons > 0));
     assert.ok(snapshots.every((entry) => !entry.dimensions.includes("attack")));
+    assert.ok(snapshots.some((entry) => entry.predictionChecks > 0));
     for (const entry of snapshots) {
       const assessed = Object.values(entry.assessmentCounts).reduce((sum, count) => sum + count, 0);
       assert.equal(assessed, entry.comparisons);
       assert.ok(Object.keys(entry.assessmentCounts).every(
-        (status) => status === "pending-assessment" || status === "zero-difference",
+        (status) => status === "pending-assessment"
+          || status === "zero-difference"
+          || status === "resolved-difference",
       ));
-      // Runtime wiring for prediction-check evidence is deliberately a later step.
-      assert.equal(entry.predictionChecks, 0);
-      assert.deepEqual(entry.predictionEvidenceCounts, {});
+      assert.equal(entry.assessmentCounts["unresolved-mismatch"] ?? 0, 0);
+
+      const checked = Object.values(entry.predictionEvidenceCounts)
+        .reduce((sum, count) => sum + count, 0);
+      assert.equal(checked, entry.predictionChecks);
+      assert.ok(Object.keys(entry.predictionEvidenceCounts).every(
+        (status) => status === "prediction-matched-observation"
+          || status === "prediction-residual-present"
+          || status === "not-formed-missing-prediction"
+          || status === "not-formed-missing-observation",
+      ));
+      if (entry.samples > 0) assert.ok(entry.predictionChecks > 0);
     }
     assert.ok(normal.v23Snapshot().every((entry) => entry === null));
   }
