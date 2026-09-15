@@ -27,6 +27,6 @@ jobs:
       - name: Run rdl_bot tests
         run: python -m unittest discover -s rdl_bot/tests -p "test_*.py" -v
       - name: Run rdl_village v2.3 boundary tests
-        run: python -m unittest rdl_village.test_v23_boundary rdl_village.test_v23_mdelta_t1 rdl_village.test_v23_authority -v
+        run: python -m unittest rdl_village.test_v23_boundary rdl_village.test_v23_mdelta_t1 rdl_village.test_v23_authority rdl_village.test_v23_runtime -v
       - name: Run rdl_village regression
         run: python -m rdl_village.test_regression
