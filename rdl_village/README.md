@@ -2,7 +2,7 @@
 
 RDL的NPCによる簡易村シミュレーター。Python実装、外部依存なし。
 
-> **Migration status:** 既存simulation本体は pre-v2.3 の歴史的実装を含む。現行Coreの意味基準は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3。`v23_boundary.py` にcanonicalな `RIB_B / F / F' / E / unresolved H` の並走境界を追加している。
+> **Migration status:** 既存simulation本体は pre-v2.3 の歴史的実装を含む。現行Coreの意味基準は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3。`v23_boundary.py` にcanonicalな有限比較境界を、`v23_live_observer.py` に実runtimeへ非介入で接続するread-only sidecarを置く。legacy `LocalLoadVector / ExplorationState / LeapEngine` は現段階では行動authorityを維持する。
 
 旧設計の参照元:
 
@@ -21,27 +21,68 @@ RDL的NPCによる簡易村シミュレーター。Python実装、外部依存�
 
 ```text
 selected village observations
-        ↓ Purpose / B / acquisition
+        ↓ Purpose / finite B / selected dimensions
 VillageRIBSection(t)
-        ↓ same pre-update model_ref
+        ↓ same frozen pre-update model_ref + coefficients
         F
 
 later selected observations
-        ↓
+        ↓ same B / Purpose / dimensions / conditions
 VillageRIBSection(t+Δ)
-        ↓ same model_ref
+        ↓ same frozen evaluator
         F'
         ↓
 E = Δ(F, F')
+        ↓
+zero-difference | pending-assessment | explicit finite classification
         ↓ unresolved only
-        H
-        ↓ H >= θ
-reconstruction candidate
+canonical H candidate
 ```
 
-また、既存 `XiPool` が担ってきた「探索しやすさ」「未確定結果の保持」は有用なsimulation stateだが、現行Core `ξ` と同一ではない。
+### Stage 1: hardened finite comparison boundary
 
-`v23_boundary.py` ではこの役割を `ExplorationState` として分離する。
+`v23_boundary.py` は次を要求する。
+
+- finite B は `boundary_id / Purpose / selected dimensions / conditions` を明示する
+- selected dimension が欠測なら F/F' を形成しない。欠測を `0` に置換しない
+- F と F' は同じ pre-update `model_ref` と明示係数を使う
+- place / band 等のfinite conditionsが変わった場合は比較窓を切り、Eを形成しない
+- 非ゼロEは大きさだけでは `unresolved` にならず、既定は `pending-assessment`
+- `VillageUnresolvedH` は boolean を直接受けず、finite assessment objectだけを受ける
+
+現段階の `VillageUnresolvedH` は migration-sidecar の候補であり、legacy Leapへのauthorityは持たない。
+
+### Stage 2: live read-only observer
+
+`v23_live_observer.py` は既存 `VillageSimulation.step()` がNPCへ渡している実知覚を opt-in で観測する。
+
+```python
+from rdl_village import VillageSimulation, attach_v23_observer
+
+simulation = VillageSimulation(seed=7)
+observer = attach_v23_observer(simulation)
+simulation.run(480)
+print(observer.snapshot())
+```
+
+初期の有限観測次元は demo-local に次の4つを選ぶ。
+
+- `body_crisis`
+- `discomfort`
+- `visible_agents`
+- `visible_resources`
+
+係数はobserver生成時にコピーして固定する。place / band が変わればwindowを切る。observerは `LocalLoadVector / ExplorationState / LeapEngine` を読んでcanonical判定を作らず、policyにも書き戻さない。
+
+固定seedテストではobserver有無で world log / village log / agent state / RNG state が一致することを要求する。
+
+---
+
+## Core ξ と demo-local exploration の分離
+
+既存 `XiPool` が担ってきた「探索しやすさ」「未確定結果の保持」は有用なsimulation stateだが、現行Core `ξ` と同一ではない。
+
+canonicalな実装名はすでに `ExplorationState` で、`XiPool` はcompatibility aliasに降格している。
 
 ```text
 ExplorationState != Core ξ
@@ -50,7 +91,24 @@ boredom / fear / dialogue load != Core H by identity
 all prediction error != H
 ```
 
-既存 `core.py / npc.py / simulation.py` の `XiPool` 名と旧H結線は、挙動を壊さない段階移行の対象として残っている。
+同様に、既存 `HVec` は `LocalLoadVector`、`Boundary` は `ActionBoundary` が実装上の本名であり、旧名は固定seed互換のため残している。
+
+---
+
+## 現行legacy/local authority
+
+既存runtimeでは `evaluate_prediction()` が prediction residual / direct motivation / boredom 等を local load に集積し、`ExplorationState` によって局所閾値を動かし、`LeapEngine` が再編を行う。
+
+これは村モデルとして保持するが、以下とは同一視しない。
+
+```text
+LocalLoadVector != Core H
+ExplorationState.value != Core ξ
+ActionBoundary.theta_effective(...) != canonical θ law
+LeapEngine != canonical H >= θ -> M_Δ authority
+```
+
+canonical observerはこの経路へまだauthorityを持たない。
 
 ---
 
@@ -70,18 +128,19 @@ python -m unittest rdl_village.test_v23_boundary -v
 
 | モジュール | 内容 |
 |---|---|
-| `v23_boundary.py` | **CURRENT migration boundary** — RIBSection / F / F' / E / unresolved H / ExplorationState |
-| `core.py` | pre-v2.3動態を含む既存simulation core。段階移行対象 |
+| `v23_boundary.py` | **CURRENT canonical boundary** — finite B / RIB_B / F / F' / E / assessment / unresolved H candidate |
+| `v23_live_observer.py` | **CURRENT live sidecar** — actual `simulation.step()` perceptionをread-only観測 |
+| `core.py` | pre-v2.3動態を含む既存simulation core。local canonical-name + compatibility alias |
 | `profiles.py` | 係数プロファイルと NeuroProfile |
 | `world.py` | 時計・場所・資源循環・物理環境 |
 | `perception.py` | 個体知覚と個体予測場 |
 | `relations.py` | 方向つき多軸関係 |
 | `dialogue.py` | 語彙ノードと構造化 DialogueEvent |
 | `action.py` | 関係作用・移動計画・物理ゲート |
-| `npc.py` | VillageNPC と意思決定サイクル |
+| `npc.py` | VillageNPC と意思決定サイクル。legacy/local authorityを現状維持 |
 | `simulation.py` | tick進行・イベント配布・結果評価・非介入観測 |
 | `richness.py` | 生命らしさの測定 |
-| `test_v23_boundary.py` | 現行Core意味境界のmigration test |
+| `test_v23_boundary.py` | canonical意味境界 + live observer非介入テスト |
 | `test_regression.py` | 固定シードの既存挙動回帰 |
 
 ---
@@ -118,13 +177,14 @@ python -m unittest rdl_village.test_v23_boundary -v
 
 ## 次の移行順
 
-1. **DONE** — `v23_boundary.py` と意味境界テストを追加
-2. `XiPool` の実役割を exploration pressure / unresolved outcome queue に分解
-3. simulation / plannerの `xi.exploration_pressure()` をdemo-local `ExplorationState.pressure` へ移す
-4. `HVec` の各チャネルを Core H / demo-local load / direct motivation に分類
-5. canonical `RIB_B(t) / RIB_B(t+Δ) → F/F' → E` をshadow観測
-6. reconstruction判定を、必要な範囲でcanonical unresolved Hへ接続
-7. 旧Core記号名をcompatibility層へ閉じ込める
+1. **DONE** — finite B / coverage / same frozen evaluator / assessment境界を硬化
+2. **DONE** — actual `simulation.step()` perceptionへread-only observerをopt-in接続
+3. **NEXT** — legacy prediction residualとは別に、current structureが局所吸収を実際に試みた有限証拠を定義
+4. post-adjustment residualを有限reviewし、`ordinary temporal change / boundary change / resolved / unresolved` を分離
+5. reviewed unresolvedだけを `H_vec -> H -> explicit θ` へ接続
+6. provenance付き `M_Δ request -> T1 Probe / Selection / M_B'` をshadow実装
+7. fresh re-entry validation後に、必要なauthorityだけをlegacy `LeapEngine` からcanonical経路へcutover
+8. 旧Core記号名をcompatibility層へさらに閉じ込める
 
 段階ごとに固定seed回帰を維持し、挙動変更と意味名称変更を同時に行わない。
 
@@ -141,4 +201,4 @@ python -m unittest rdl_village.test_v23_boundary -v
 - 破断・負荷が特定チャネルへ偏る可能性
 - `gather` がほとんど駆動しない条件
 - 夜に留まるコストが弱く、生活相として立ちにくい
-- demo-local探索圧とCore ξの旧同一化を完全に解消する必要
+- demo-local explorationとCore ξの旧語彙をcompatibility層へ完全隔離する必要
