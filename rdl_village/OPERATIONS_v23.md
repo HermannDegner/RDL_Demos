@@ -70,6 +70,29 @@ simulation.run(480)
 print(coverage.snapshot())
 ```
 
+## `v23_report.py`
+
+read-only baseline を標準JSONとして取得する入口。
+
+```bash
+python -m rdl_village.v23_report --ticks 640 --seed 7 --theta 1.0 --review-windows 3
+```
+
+出力は agent ごとに次を含む。
+
+- review candidate 数
+- explicit review 数
+- candidate が形成された finite place / band context
+- dimension別 candidate 数
+- advisory review recommendation
+- explicit reviewだけから形成された canonical H の現状
+- install済み finite context 数
+- active canonical runtime session 数
+
+このコマンド自身は explicit review を一件も実行しない。そのため baseline 実行だけで `unresolved-mismatch`、canonical H、`M_Δ`、`M_B'` が作られることはない。
+
+同じ seed / tick / operational options は同じ baseline report を返すことをCIで確認する。
+
 ## 有限境界
 
 一つの recommendation や install済み `M_B'` を別 place / band へ一般化しない。
