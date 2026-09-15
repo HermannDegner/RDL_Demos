@@ -48,17 +48,18 @@ export class LivingFieldHSidecar {
     if (!(review instanceof PostAdjustmentResidualReview)) {
       throw new Error("Living Field H sidecar accepts only PostAdjustmentResidualReview values");
     }
+
+    const nextContext = contextKey(review);
+    if (this.context && !sameContext(this.context, nextContext)) {
+      throw new Error("cannot accumulate Living Field H across different finite review contexts");
+    }
+
+    if (!this.context) this.context = nextContext;
     this.reviewed += 1;
     this.lastReview = review;
 
     if (!review.eligibleForLivingFieldH) {
       return this.snapshot();
-    }
-
-    const nextContext = contextKey(review);
-    if (!this.context) this.context = nextContext;
-    else if (!sameContext(this.context, nextContext)) {
-      throw new Error("cannot accumulate Living Field H across different finite review contexts");
     }
 
     const next = { ...this.values };
