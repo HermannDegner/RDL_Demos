@@ -1,235 +1,356 @@
-# Living Field v2.3 migration checkpoint
+# Living Field v2.3 canonical migration — complete
 
-2026-09-15。現行 `main` の Core / Functions v2.3 参照実装を基準に、Living Field を実際の観測経路から段階移行する。
-この作業は Bot / Village の migration branch に依存せず、`main` から独立して進める。
+2026-09-15。Living Field の canonical 経路を、T0 BASE / SPEC v2.3 と T1 SILN操作層に合わせて完結させた。
 
-## 先に Living Field を扱う理由
-
-Living Field では Rabbit / Predator が共通の `evaluateDecision` 経路を持ち、正規化済み観測値を reliability 更新前に取得できる。
-そのため、既存の行動runtimeを変えずに、実際の相互作用から有限な観測断面を形成し、同じ有限評価器で F / F' / E を比較できる。
-
-既存runtimeには prediction error、local load、legacy leap 等があるが、それらをそのまま Core v2.3 の E / H / ξ と読み替えない。
-sidecar は既存行動から読み取るだけで、policy、memory、reliability、local load、legacy leap の authority を変更しない。
-
-## 現在の接続
-
-```js
-const simulation = new Simulation({ seed: 2401, observeV23: true });
-simulation.step(720);
-const diagnostics = simulation.v23Snapshot();
-```
+この文書でいう「complete」は、有限境界のもとで次の経路が実装・検査され、ブラウザ起動時にも canonical authority が実際の再編 authority になることを指す。
 
 ```text
 actual interaction
-    ↓
-evaluateDecision.observed
-    ↓ finite selected dimensions
-RIB_B approximation
-    ↓ same frozen finite evaluator
-F(t) / F(t+Δ)
-    ↓
-E = Δ(F, F')
-    ↓
-explicit assessment gate
-    ├─ zero-difference
-    ├─ pending-assessment
-    ├─ ordinary-temporal-change
-    ├─ boundary-or-coverage-change
-    ├─ resolved-difference
-    └─ unresolved-mismatch
-             ↓ explicit finite post-adjustment review only
-           H_vec
-             ↓ demo-local L2 finite concretization
-           H = ||H_vec||
-             ↓ explicit diagnostic θ
-          H >= θ ?
-             ↓ yes
-        M_Δ request
-             ↓ explicit current M_B binding only
-        T1 handoff (read-only)
-             ↓
-        Probe / Selection / Reconstruction are still not executed
+  ↓
+finite B / RIB_B approximation
+  ↓ same frozen finite evaluator
+F / F'
+  ↓
+E
+  ↓ explicit finite assessment
+resolved / temporal / coverage / unresolved
+  ↓ reviewed unresolved only
+H_vec
+  ↓ demo-local finite norm
+H = ||H_vec||
+  ↓ explicit θ
+H >= θ
+  ↓
+M_Δ
+  ↓ current M_B objectified as SILN_SELF
+T1 Probe
+  ↓
+Inspection / Selection = retain | reject | defer
+  ↓ retain only
+Reconstruction
+  ↓
+M_B'
+  ↓ fresh finite observation
+F_new / E_new / H_new
+  ↓ finite re-entry validation
+normal operation
 ```
 
-- `evaluateDecision` が作る正規化済み `observed` を有限作用断面の実装近似として取得する。
-- `decision.prediction` や legacy H を RIB_B へ流用しない。
-- 有限評価器は取得時の reliability 係数をコピーした重み付き変換であり、個体全体の `M_B` そのものではない。
-- 前時刻で凍結した同じ係数を使い、二つの断面から F / F' を形成する。
-- ここでの E は隣接する観測窓の重み付き解釈差であり、予測失敗、損失、未解消残差、再編必要性を自動的には意味しない。
-- 非ゼロ E は、判定根拠が無ければ `pending-assessment` のまま保持する。
-- 明示分類には `basis` を必須とする。
-- 欠測・非有限値があれば比較窓を切り、ゼロで補完しない。
-- 個体間で observer を共有せず、episode 再生成時は新しい比較窓にする。
-- 既定は無効。ブラウザUIと既存snapshot schemaは変更しない。
+`ξ` はこの経路のどこでも数値誤差・prediction residual・探索圧へ変換しない。各 `M_B` / `M_B'` は有限であり、未回収関係が残ることを `xiStatus = unrecovered-relations-remain` としてのみ保持する。
 
-## prediction-check evidence
+---
 
-legacy `error = |observed - decision.prediction|` を canonical E として流用しない。
-代わりに、予測が形成された時点の有限な prediction と reliability をコピーし、後続観測時に別の検査断面として再比較する `beginPredictionWindow()` / prediction-check を sidecar に接続する。
+## 1. 一般観測境界
+
+Rabbit は `resource / danger / motion`、Predator は一般境界で `prey / motion` を扱う。
+
+`evaluateDecision.observed` を有限 interaction section の実装近似として取得し、取得時 reliability をコピーした同じ有限評価器で二つの窓を解釈する。
 
 ```text
-Rabbit / Predator plan()
-    ↓ decision prediction formed
-beginPredictionWindow()
-    ↓ copy selected prediction + coefficients
-finite prediction snapshot
-    ↓ later observed window
-same copied coefficients
-    ↓
-weighted prediction / weighted observation
-    ↓
-prediction-check residual
+observed(t)   ── frozen evaluator ──> F
+observed(t+Δ) ── same evaluator   ──> F'
+                                   ↓
+                                   E
 ```
 
-- prediction-check residual が **0** で、同じ選択次元・凍結係数の予測が後続観測と一致した場合、非ゼロ temporal E を `resolved-difference` とする有限根拠になりうる。
-- prediction-check residual が非ゼロであっても、その大きさだけでは `unresolved-mismatch` に昇格させない。
-- prediction または必要係数が欠ける場合、ゼロや unresolved を捏造しない。
-- prediction-check は legacy H / xi / thetaEffective を参照せず、行動を変えない。
+- raw temporal `E` は prediction failure、unresolved、H、再編必要性と同一視しない。
+- 欠測・非有限値は窓を切り、ゼロを捏造しない。
+- observer は policy から読み取られない段階を経て検証され、canonical cutover 後も acquisition / evidence role を保つ。
 
-## 局所吸収試行 evidence
+---
 
-prediction residual 自体を「吸収失敗」とみなさない。
-`capture()` 後の選択次元 reliability を凍結し、次の `beginPredictionWindow()` で再取得した reliability と比較する。
+## 2. prediction-check と局所吸収試行
 
-現在のデモ局所 reliability 更新は `rate=0.035`, clamp `[0.18, 0.98]` なので、その1回の有限更新で到達可能な範囲だけを監査契約 `bounded-reliability-step-v1` とする。
+予測形成時に selected prediction と reliability をコピーし、後続観測時に別の finite evidence として再検査する。
 
 ```text
-capture時 reliability
-    ↓ freeze
-次plan時 reliability
-    ↓ finite transition audit
-    ├─ no-observed-local-adjustment
-    ├─ bounded-local-adjustment-observed
-    ├─ confounded-structural-change
-    └─ not-formed-missing-local-coefficient
+decision prediction
+  ↓ freeze prediction + coefficients
+later observed
+  ↓
+prediction-check
 ```
 
-- `bounded-local-adjustment-observed` は、このデモの局所更新が実際に起きたことを示す有限証拠であり、Core一般則ではない。
-- 1回の局所更新包絡を超える変化は、legacy leap その他の構造変化が混ざりうるため `confounded-structural-change` として除外する。
-- bounded local adjustment 後に prediction residual が残れば `prediction-residual-after-bounded-local-adjustment` と記録するが、それだけでは unresolved にしない。
+prediction が later observed と一致した場合、非ゼロ temporal E を `resolved-difference` とする有限根拠になりうる。
 
-## unresolved の有限 review 条件
+prediction residual は、どれほど大きくてもそれだけでは unresolved にならない。
 
-Living Field で H へ入れる `unresolved-mismatch` は、`v23_post_adjustment_review.mjs` の専用 review gate を通したものに限定する。
+さらに、capture 後の reliability と次 plan 時の reliability を比較し、現在デモの1回の bounded local updater で到達可能な変化だけを局所吸収試行 evidence とする。
 
 ```text
-post-adjustment residual
-    ↓ explicit finite review
-  1. same B
-  2. same Purpose
-  3. same selected dimensions
-  4. bounded local absorption-attempt evidence exists
-  5. coverage change is not the explanation
-  6. ordinary temporal change is explicitly excluded
-  7. reviewer + finite evidenceRefs + basis are present
-    ↓
-unresolved-mismatch
+no-observed-local-adjustment
+bounded-local-adjustment-observed
+confounded-structural-change
+not-formed-missing-local-coefficient
 ```
 
-coverage change が観測された場合は `boundary-or-coverage-change`、通常時間変化で説明する場合は `ordinary-temporal-change` とする。
-上記 review は終端的真理判定ではなく、その B・Purpose・取得条件における有限な措定であり、後続情報で再検査されうる。
+legacy leap 等が混ざりうる大きな変化は `confounded-structural-change` として除外する。
 
-## read-only H sidecar
+---
 
-`v23_h_sidecar.mjs` は `PostAdjustmentResidualReview` 以外を受け付けない。
-generic assessment 風オブジェクト、prediction residual magnitude、legacy `H / xi / thetaEffective` は入力経路を持たない。
+## 3. unresolved の成立条件
+
+`unresolved-mismatch` は magnitude 閾値では作らない。
+
+専用 finite review gate は少なくとも次を要求する。
+
+1. same finite B
+2. same Purpose
+3. same selected dimensions
+4. bounded local absorption-attempt evidence
+5. stable selected coverage
+6. ordinary temporal change の明示的除外
+7. non-empty basis
+8. reviewer identity
+9. finite evidence references
+
+coverage change が説明になる場合は `boundary-or-coverage-change`、ordinary temporal change で説明する場合は `ordinary-temporal-change` とし、Hへ入れない。
+
+review はその B / Purpose / evidence における有限措定であり、終端真理ではない。
+
+---
+
+## 4. H sidecar
+
+`v23_h_sidecar.mjs` は completed `PostAdjustmentResidualReview` だけを受け付ける。
+
+generic assessment-shaped object、prediction residual magnitude、historical `H / xi / thetaEffective` には入力経路がない。
 
 ```text
-reviewed unresolved mismatch only
-    ↓
+reviewed unresolved E
+  ↓
 H_vec[dimension] += |E_dimension|
-    ↓
-H = ||H_vec||_2
-    ↓
+  ↓
+H = ||H_vec||₂
+  ↓
 explicit θ
-    ↓
-shouldReconstruct (diagnostic only)
 ```
 
-- L2 はこのデモ局所の有限具体化 `l2-demo-local-v1` であり、Core唯一の norm と主張しない。
-- θ は sidecar 作成時に明示指定し、legacy thetaEffective から取得しない。
-- 異なる B / Purpose / dimensions の review を同じ H に蓄積しない。
-- context 不一致による拒否は atomic で、H・count・last review を変更しない。
-- `shouldReconstruct` は診断値であり、それ自体では policy を起動しない。
-- Core ξ を数値化しない。
+L2 は Living Field の demo-local finite concretization `l2-demo-local-v1` であり、Core唯一の norm ではない。
 
-## M_Δ request / T1 handoff
+異なる B / Purpose / dimensions は同じ H に蓄積しない。context mismatch の拒否は atomic である。
 
-T0 の最低動作では `H >= θ` が再編相 `M_Δ` への移行条件になる。一方、既存 `M_B` の対象化、Probe、Selection、`M_B'` 再構成は T1 の責務である。
-Living Field ではこの境界を `v23_mdelta_request.mjs` に分離する。
+---
+
+## 5. M_Δ request と T0 / T1 handoff
+
+`H >= θ` だけの裸のフラグから再構成対象を発明しない。
+
+`requestMDelta()` は、現在 H を支える unresolved review 集合が同じ有限 context にあり、その集合から現在 `H_vec` を再生成できることを要求する。
+
+request は次を保持する。
+
+- B / Purpose / dimensions
+- H_vec / H / θ / normRef
+- review provenance
+- request basis / requester
+
+request 時点では `M_B'` を作らない。
+
+`bindMDeltaSubject()` が別工程として current `M_B` を `SILN_SELF` として明示的に対象化し、T1へ渡す。
+
+---
+
+## 6. T1 Probe / Selection / Reconstruction
+
+T1 実装は `v23_t1_reconstruction.mjs` に分離する。
 
 ```text
-LivingFieldHSidecar
-    ↓ H >= θ
-requestMDelta()
-    ↓
-MDeltaRequest
-    ├─ same finite context
-    ├─ H_vec / H / θ / normRef
-    ├─ finite unresolved review provenance
-    ├─ subjectRef = null
-    ├─ reconstructionTargetRef = null
-    └─ reconstructedModelRef = null
-          ↓ explicit binding only
-bindMDeltaSubject()
-          ↓
 MDeltaT1Handoff
-    ├─ explicit current M_B subjectRef
-    ├─ subjectRole = SILN_SELF-current-M_B
-    ├─ reconstructionTargetRef = null
-    ├─ selectionStatus = not-performed
-    └─ authority = T1-handoff-only
+  ↓
+finite current M_B capture
+  ↓
+candidate expansion
+  ↓
+future finite shadow Probe windows
+  ↓
+Selection
+  ├─ retain
+  ├─ reject
+  └─ defer
+       ↓ retain only
+ReconstructedFiniteModel (M_B' proposal)
 ```
 
-- `requestMDelta()` は `H < θ` では形成できない。
-- request に渡す unresolved review 集合は H sidecar の `unresolvedReviews` 件数と一致し、同じ有限 context でなければならない。
-- review から再構成した `H_vec` が sidecar の現在 `H_vec` と一致しない場合、request を拒否する。これにより provenance の欠落した threshold claim を作らない。
-- request 自体は現在 `M_B` の具体参照を推測しない。`subjectRef` は `null` のまま保持する。
-- T1へ渡すときだけ `bindMDeltaSubject()` で現在の `M_B` を明示的に `SILN_SELF` として束縛する。
-- `M_B'`、再構成 target、Selection 結果は一切発明しない。これらは T1 の Probe / Selection / Reconstruction が別途形成する。
-- request / handoff は policy を変えず、legacy leap の authority を持たない。
-- numeric ξ フィールドを作らない。
+候補生成規則は Living Field の demo-local rule であり Core law ではない。
 
-## attack を分離する理由
+Probe は world / RIB / ξ の全体取得ではなく、後続 finite prediction/observation evidence による selected dimension の有限検査である。
 
-Predator の `attack` は今回の比較次元から除外する。
-攻撃未試行を「失敗ゼロ」と扱うと、未観測と成功を混同するためである。
-attack は今後、試行した / していない、接触した / 逸脱した、成功 / 失敗を分けられる試行単位の別境界 `B_attack` として設計する。
+Selection は現在の有限 scope で `retain / reject / defer` を明示する。Probe coverage 不足は `defer`、改善しない candidate は `reject` する。
 
-## 検証
+retain された再構成は、valid conditions、break conditions、unresolved items、provenance を保持して `M_B'` proposal となる。
 
-固定 seed 41 / 2401 について、観測あり・なしを同じtickで走らせ、次が一致することを要求する。
+適用後も `xiStatus = unrecovered-relations-remain` であり、終端閉包しない。
 
-- world snapshot
-- agent memory
-- reliability
-- local load
-- decision
-- causal events
-- RNG state
+---
 
-追加で次を固定する。
+## 7. 再構成後の通常運転復帰
 
-- Rabbit / Predator の両方で prediction-check が実発生する
-- bounded local adjustment evidence が実働で形成される
-- out-of-envelope structural change を absorption-attempt と誤認しない
-- residual magnitude だけでは unresolved にならない
-- coverage / temporal disposition を review で明示しないと unresolved review は成立しない
-- bounded local absorption-attempt evidence がない residual は unresolved review に入れない
-- review は reviewer / basis / finite evidenceRefs を要求する
-- coverage change / ordinary temporal change は H に入らない
-- generic assessment / legacy numeric state は Living Field H sidecar に入らない
-- reviewed unresolved だけが H_vec を更新する
-- H sidecar は異なる有限 context を混合しない
-- sidecar の `shouldReconstruct` は policy を変えない
-- `H < θ` では M_Δ request を作れない
-- M_Δ request の review provenance が H_vec を再現できなければ拒否する
-- M_Δ request は `M_B'` や reconstruction target を作らない
-- T1 handoff は current M_B の明示 subject binding だけを許し、Selection / Reconstruction を実行しない
+`M_B'` 適用時に pre-reconstruction observer / H を持ち越さない。
 
-## 次段階
+fresh observer と fresh H sidecar で後続有限窓を取得する。
 
-T0側の canonical 経路は、実観測から `E → reviewed unresolved → H_vec → H → θ → M_Δ request → T1 handoff` まで read-only で接続した。
+```text
+M_B'
+  ↓ fresh RIB_B'
+F_new
+  ↓
+E_new → reviewed unresolved → H_new
+```
 
-残る Living Field 本体の大工程は **authority cutover** である。ただし、その前に T1 側で `MDeltaT1Handoff` から Probe / Selection / Reconstruction proposal を形成し、`M_B'` を有限根拠付きで返せる経路を独立検証する必要がある。
-その経路が安定するまで既存 local leap の authority は置き換えない。
+re-entry completion は、
+
+- H < θ
+- 必要数の post-reconstruction finite comparisons / reviews
+- explicit basis
+- validator identity
+- finite evidenceRefs
+
+を要求する。
+
+成立した場合だけ `normal-operation-restored` とする。
+
+---
+
+## 8. Predator B_attack
+
+attack を一般 `prey / motion` 境界へ混ぜない。
+
+`v23_attack_boundary.mjs` は attempt-specific boundary を形成する。
+
+```text
+beginAttack
+  ↓ attempted=true
+frozen capture prediction / reliability
+  ↓
+actual attempt outcome
+  ├─ capture-success
+  ├─ contact-escape
+  ├─ obstacle-failure
+  └─ timeout-or-range-failure
+```
+
+**unattempted attack は failure zero ではない。**
+
+attempt が存在しない場合、B_attack section 自体を形成しない。
+
+contact / escape / obstacle / success を provenance に保持する。
+
+attack reliability の bounded local adjustment 後にも attempted-outcome residual が残り、finite review を通った場合だけ B_attack H に入る。
+
+B_attack は一般Hと別 context / sidecar を持ち、T1では attack-specific candidate / Probe / Selection / Reconstruction を行う。
+
+---
+
+## 9. Complete canonical authority
+
+`v23_complete_authority.mjs` は一般経路と B_attack を統合する。
+
+install 後は historical `maybeLeap` の legacy H / xi / thetaEffective が再構成を起動しない。
+
+historical fields は regression / compatibility diagnostics として更新されうるが authority ではない。
+
+canonical reconstruction のみが `M_B'` を適用する。
+
+`leapCount` は既存UI互換の表示カウンタとして更新するだけで、判定 source ではない。
+
+---
+
+## 10. operational reviewer
+
+`v23_live_runtime.mjs` は手動 review を不要にする demo-local finite reviewer を提供する。
+
+ただし residual を1回見ただけで unresolved にしない。
+
+標準 rule は、
+
+> same finite B / Purpose / dominant dimension のもとで、bounded local adjustment 後の residual が複数の**異なる**有限窓に連続して残った場合にのみ、ordinary temporal change を operationally excluded と措定する
+
+である。
+
+デフォルト browser rule は2窓。これは終端真理規則ではなく `persistent-post-adjustment-residual-v1` という明示的な demo-local review contract である。
+
+同一 evidence を繰り返し読むことでは persistence count を増やさない。
+
+一般経路と B_attack が同時に Predator の再編 authority を競合しないよう、一方が M_Δ / re-entry 中は他方の operational review を開始しない。
+
+---
+
+## 11. browser cutover
+
+既存 `app.mjs` はUIコードを維持する。
+
+先に評価される `local_aliases.mjs` がブラウザ時だけ bootstrap を行う。
+
+1. `Simulation` episode creation 前に `observeV23=true` を成立させる
+2. 最初の physical tick 前に live complete canonical runtime を install する
+3. UIの `localLoad` は canonical H_vec を読む
+4. UIの local threshold は canonical general θ を読む
+5. demo-local adaptationPressure は compatibility scalar のままで Core ξ としない
+
+Node環境では `window` が存在しないため browser bootstrap は実行されず、alias regression のみ維持する。
+
+browser default は明示的な demo-local値として、
+
+```text
+theta = 1
+attackTheta = 1
+reviewWindows = 2
+attackReviewWindows = 2
+probeWindows = 2
+reentryWindows = 2
+```
+
+を使う。URL query で有限設定を変更できる。
+
+これらの値は Core定数ではない。
+
+---
+
+## 12. programmatic runtime
+
+完全経路を直接生成する場合は `v23_live_runtime.mjs` の factory を使う。
+
+```js
+import { createLiveCanonicalLivingFieldSimulation } from "./v23_live_runtime.mjs";
+
+const runtime = createLiveCanonicalLivingFieldSimulation({
+  seed: 2401,
+  theta: 1,
+  attackTheta: 1,
+  reviewWindows: 2,
+  probeWindows: 2,
+  reentryValidationWindows: 2,
+});
+
+runtime.simulation.step(720);
+const snapshot = runtime.snapshot();
+```
+
+programmatic factory は θ / attackTheta を暗黙推定せず、明示値を要求する。
+
+---
+
+## 13. completion conditions
+
+Living Field v2.3 migration は次を満たした状態を completion とする。
+
+- actual Rabbit / Predator observation が finite v2.3 path へ入る
+- raw E が automatic H にならない
+- local absorption attempt が別 evidence として存在する
+- unresolved は finite review を要求する
+- reviewed unresolved only が H_vec へ入る
+- H / θ から provenance-preserving M_Δ request が形成される
+- current M_B が SILN_SELF として明示対象化される
+- T1 Probe / Selection retain-reject-defer が実在する
+- retained candidate only が M_B' proposal / apply へ進む
+- M_B' 後に fresh finite validation が必要
+- Predator attack は separate B_attack で attempt-specific に扱う
+- unattempted != failure zero
+- browser runtime で canonical authority が legacy leap authority を置換する
+- legacy numeric xi は Core ξ ではない
+- ξ / ξ' は未回収関係を残したまま閉じない
+
+この境界で canonical Living Field migration は完了する。
+
+今後の変更は「移行の残作業」ではなく、Probe候補の拡張、Selection道具の高度化、θやreview contractの実験的較正、UI診断表示の改善など、完成した有限経路上の発展として扱う。
