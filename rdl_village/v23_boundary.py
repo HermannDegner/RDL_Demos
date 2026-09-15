@@ -141,12 +141,23 @@ class VillageMismatch:
     boundary_id: str
     purpose: str
     dimensions: tuple[str, ...]
+    conditions: Mapping[str, Any]
     current_section_id: str
     later_section_id: str
     model_ref: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "values", _freeze_float_mapping(self.values))
+        object.__setattr__(self, "conditions", _freeze(self.conditions))
+
+    @property
+    def context_key(self) -> tuple[Any, ...]:
+        return (
+            self.boundary_id,
+            self.purpose,
+            self.dimensions,
+            tuple(sorted(self.conditions.items())),
+        )
 
     @property
     def magnitude(self) -> float:
@@ -348,6 +359,7 @@ def compare_village_interpretations(
         boundary_id=current.boundary_id,
         purpose=current.purpose,
         dimensions=current.dimensions,
+        conditions=current.conditions,
         current_section_id=current.section_id,
         later_section_id=later.section_id,
         model_ref=current.model_ref,
