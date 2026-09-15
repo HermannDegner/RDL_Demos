@@ -1181,6 +1181,13 @@ export class Rabbit extends RelationalAgent {
       },
       age: 0,
     };
+    if (this.v23Observer) {
+      this.v23Observer.beginPredictionWindow({
+        tick,
+        prediction: this.decision.prediction,
+        reliability: this.reliability,
+      });
+    }
     this.planTimer = this.profile.planInterval;
     if (title !== this.lastLoggedDecision.title || tick - this.lastLoggedDecision.tick >= 60) {
       this.log(tick, "decision", title, reason);
@@ -1549,6 +1556,13 @@ export class Predator extends RelationalAgent {
       },
       age: 0,
     };
+    if (this.v23Observer) {
+      this.v23Observer.beginPredictionWindow({
+        tick,
+        prediction: this.decision.prediction,
+        reliability: this.reliability,
+      });
+    }
     this.targetId = visibleTarget?.id ?? null;
     this.planTimer = this.profile.planInterval;
     this.state = label === "explore" ? "wander" : label;
