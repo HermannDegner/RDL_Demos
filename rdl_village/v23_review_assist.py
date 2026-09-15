@@ -2,7 +2,7 @@
 
 This module never classifies a mismatch as unresolved.  It only notices when
 already-formed finite review candidates show the same signed residual in the
-same finite context across multiple distinct observation windows.
+same finite context across multiple distinct, consecutive candidate windows.
 
 A recommendation is therefore evidence for *where a human/explicit reviewer
 may want to look next*, not evidence that ordinary temporal change has been
@@ -98,7 +98,9 @@ class VillageReviewAdvisor:
 
         Re-reading the same candidate list cannot manufacture persistence because
         candidate and later-section identifiers are de-duplicated before window
-        counting.  A sign reversal starts a new run for that dimension.
+        counting.  Within one finite context, a sign reversal, a below-filter
+        residual, or a candidate window that lacks support for the dimension
+        breaks the persistence run.
         """
 
         unique = []
@@ -110,70 +112,82 @@ class VillageReviewAdvisor:
             seen_candidates.add(candidate_id)
             unique.append(candidate)
 
-        series: dict[tuple[Any, ...], list[tuple[Any, float]]] = {}
+        contexts: dict[tuple[Any, ...], list[Any]] = {}
         for candidate in unique:
-            mismatch = candidate.mismatch
-            context = mismatch.context_key
-            for dimension in candidate.candidate_dimensions:
-                value = float(mismatch.values[dimension])
-                if not math.isfinite(value) or abs(value) <= self.minimum_abs_residual:
-                    continue
-                key = (candidate.agent_name, context, str(dimension))
-                series.setdefault(key, []).append((candidate, value))
+            key = (candidate.agent_name, candidate.mismatch.context_key)
+            contexts.setdefault(key, []).append(candidate)
 
         recommendations = []
-        for (agent_name, context, dimension), entries in series.items():
-            run = []
-            run_direction = None
-            seen_sections = set()
-            for candidate, value in entries:
-                section_id = str(candidate.mismatch.later_section_id)
-                if section_id in seen_sections:
-                    continue
-                seen_sections.add(section_id)
-                direction = _direction(value)
-                if direction != run_direction:
-                    run = []
-                    run_direction = direction
-                run.append((candidate, value))
+        for (agent_name, context), entries in contexts.items():
+            dimensions = tuple(
+                dict.fromkeys(
+                    dimension
+                    for candidate in entries
+                    for dimension in candidate.candidate_dimensions
+                )
+            )
+            for dimension in dimensions:
+                run = []
+                run_direction = None
+                seen_sections = set()
+                for candidate in entries:
+                    section_id = str(candidate.mismatch.later_section_id)
+                    if section_id in seen_sections:
+                        continue
+                    seen_sections.add(section_id)
 
-            if len(run) < self.required_distinct_windows:
-                continue
-            selected = run[-self.required_distinct_windows :]
-            candidate_ids = tuple(item.candidate_id for item, _ in selected)
-            section_ids = tuple(item.mismatch.later_section_id for item, _ in selected)
-            evidence_refs = _stable_unique(
-                ref
-                for item, _ in selected
-                for ref in (
-                    *item.evidence_refs,
-                    item.local_absorption.evidence_ref,
+                    if dimension not in candidate.candidate_dimensions:
+                        run = []
+                        run_direction = None
+                        continue
+                    value = float(candidate.mismatch.values[dimension])
+                    if not math.isfinite(value) or abs(value) <= self.minimum_abs_residual:
+                        run = []
+                        run_direction = None
+                        continue
+                    direction = _direction(value)
+                    if direction != run_direction:
+                        run = []
+                        run_direction = direction
+                    run.append((candidate, value))
+
+                if len(run) < self.required_distinct_windows:
+                    continue
+                selected = run[-self.required_distinct_windows :]
+                candidate_ids = tuple(item.candidate_id for item, _ in selected)
+                section_ids = tuple(item.mismatch.later_section_id for item, _ in selected)
+                evidence_refs = _stable_unique(
+                    ref
+                    for item, _ in selected
+                    for ref in (
+                        *item.evidence_refs,
+                        item.local_absorption.evidence_ref,
+                    )
                 )
-            )
-            recommendation_id = (
-                f"village-review-advice:{agent_name}:{dimension}:"
-                f"{section_ids[0]}->{section_ids[-1]}"
-            )
-            basis = (
-                f"same finite context retained across {len(selected)} distinct review-candidate windows",
-                f"same signed {dimension} residual persisted across those windows",
-                "each contributing window already carries bounded local absorption-attempt evidence",
-                "recommendation does not exclude ordinary temporal change or boundary/coverage change",
-            )
-            recommendations.append(
-                VillageReviewRecommendation(
-                    recommendation_id=recommendation_id,
-                    agent_name=agent_name,
-                    context_key=context,
-                    dimension=dimension,
-                    direction=run_direction,
-                    window_count=len(selected),
-                    candidate_ids=candidate_ids,
-                    section_ids=section_ids,
-                    evidence_refs=evidence_refs,
-                    basis=basis,
+                recommendation_id = (
+                    f"village-review-advice:{agent_name}:{dimension}:"
+                    f"{section_ids[0]}->{section_ids[-1]}"
                 )
-            )
+                basis = (
+                    f"same finite context retained across {len(selected)} consecutive review-candidate windows",
+                    f"same signed {dimension} residual persisted across those windows",
+                    "each contributing window already carries bounded local absorption-attempt evidence",
+                    "recommendation does not exclude ordinary temporal change or boundary/coverage change",
+                )
+                recommendations.append(
+                    VillageReviewRecommendation(
+                        recommendation_id=recommendation_id,
+                        agent_name=agent_name,
+                        context_key=context,
+                        dimension=dimension,
+                        direction=run_direction,
+                        window_count=len(selected),
+                        candidate_ids=candidate_ids,
+                        section_ids=section_ids,
+                        evidence_refs=evidence_refs,
+                        basis=basis,
+                    )
+                )
 
         return tuple(recommendations)
 
