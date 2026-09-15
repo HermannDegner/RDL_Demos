@@ -40,6 +40,13 @@ from .v23_boundary import (
     VillageUnresolvedH,
     assess_village_mismatch,
 )
+from .v23_compatibility import (
+    ALIASES,
+    CANONICAL_V23_MODULES,
+    VillageCompatibilityAlias,
+    compatibility_snapshot,
+    village_local_dynamics_view,
+)
 from .v23_live_observer import VillageCanonicalObserver, attach_v23_observer
 from .v23_mdelta_t1 import (
     VillageMDeltaRequest,
@@ -103,6 +110,11 @@ __all__ = [
     "VillageCanonicalRuntimeDriver",
     "VillageCanonicalRuntimeSession",
     "VillageOperationalCoverage",
+    "VillageCompatibilityAlias",
+    "ALIASES",
+    "CANONICAL_V23_MODULES",
+    "compatibility_snapshot",
+    "village_local_dynamics_view",
     "INSTALL_KIND",
     "INSTALL_SCOPE",
     "assess_village_mismatch",
