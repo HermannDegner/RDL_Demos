@@ -1,7 +1,7 @@
 # Living Field v2.3 migration checkpoint
 
-2026-09-14。現行 `main` の Core / Functions v2.3 参照実装を基準に、Living Field を実際の観測経路から段階移行する。
-この差分は Bot / Village の migration branch に依存せず、`main` から独立している。
+2026-09-15。現行 `main` の Core / Functions v2.3 参照実装を基準に、Living Field を実際の観測経路から段階移行する。
+この作業は Bot / Village の migration branch に依存せず、`main` から独立して進める。
 
 ## 先に Living Field を扱う理由
 
@@ -80,6 +80,34 @@ E != 0
 この `basis` は終端的真理ではなく、その B・Purpose・取得条件のもとでの有限な判定根拠である。
 後続の情報で分類が変わりうることを排除しない。
 
+## prediction-check evidence
+
+legacy `error = |observed - decision.prediction|` を canonical E として流用しない。
+代わりに、予測が形成された時点の有限な prediction と reliability をコピーし、後続観測時に別の検査断面として再比較できる `beginPredictionWindow()` / prediction-check を sidecar に追加する。
+
+```text
+prediction-window start
+    ↓ copy selected prediction + coefficients
+finite prediction snapshot
+    ↓ later observed window
+same copied coefficients
+    ↓
+weighted prediction / weighted observation
+    ↓
+prediction-check residual
+```
+
+この residual は Core E ではなく、E を assessment するための有限な補助証拠である。
+したがって次の非対称な規則だけを現段階で許す。
+
+- prediction-check residual が **0** で、同じ選択次元・凍結係数の予測が後続観測と一致した場合、非ゼロ temporal E を `resolved-difference` とする有限根拠になりうる。
+- prediction-check residual が非ゼロであっても、その大きさだけでは `unresolved-mismatch` に昇格させない。`pending-assessment` のまま残す。
+- prediction または必要係数が欠ける場合、検査は `not-formed-missing-prediction` として保持し、ゼロや unresolved を捏造しない。
+- prediction-check は legacy H / xi / thetaEffective を参照しない。
+- prediction-check 自体は H を作らず、行動を変えない。
+
+この段階では evidence API とテストだけを固定し、実働 Rabbit / Predator から prediction-window を開始する配線はまだ行わない。これにより、現在の seeded evolution と authority は完全に不変のまま、次段の実配線を独立に検査できる。
+
 ## attack を分離する理由
 
 Predator の `attack` は今回の比較次元から除外する。
@@ -100,7 +128,7 @@ attack は今後、試行した / していない、接触した / 逸脱した�
 
 Rabbit / Predator の両方で実比較が発生すること、欠測時に比較窓が切れること、以前の係数が凍結されること、snapshot が読み取り専用であることも検証する。
 
-assessment については追加で次を固定する。
+assessment / prediction-check については追加で次を固定する。
 
 - 非ゼロ E は根拠なしで `pending-assessment` に留まる
 - 明示分類は basis を要求する
@@ -108,12 +136,17 @@ assessment については追加で次を固定する。
 - pending のまま H 更新できない
 - resolved / temporal / boundary-coverage は H に入らない
 - 明示的な `unresolved-mismatch` のみ H 候補になれる
+- prediction-check は開始時の係数をコピーし、後続の live reliability 変更に追随しない
+- prediction と後続観測が一致した場合だけ、自動 `resolved-difference` の根拠として使える
+- prediction residual は大きくても自動 unresolved にしない
+- prediction の欠測をゼロ扱いしない
+- evidence API を追加しても、未配線の実働 simulation は従来どおり pending / zero のみであり、seeded evolution は不変
 
 ## 次段階
 
-次に必要なのは、実働 Living Field のどの有限な証拠を assessment に使えるかを設計することである。
-とくに「単なる隣接時刻の変化」と「現在の有限モデルが吸収できなかった不整合」を区別する根拠が必要になる。
+次は、実働 Rabbit / Predator が新しい decision window を形成した直後に、その window の prediction と更新前係数を sidecar へ渡す配線を行う。
+その配線では decision object 自体や既存 snapshot schema を変更せず、observer 内部へコピーするだけにする。
 
-候補は既存の legacy prediction error をそのまま流用するのではなく、同じ B と更新前モデルに整合する別の検査断面として再取得する。
-その根拠が固定できた後にだけ、`unresolved-mismatch → H_vec → H = ||H_vec|| → θ` の読み取り専用 sidecar を接続する。
+実配線後も、prediction residual 非ゼロから unresolved への自動昇格は禁止したままにする。
+その後、現在構造による局所吸収を実際に試みたことを示す別の有限証拠を設計できた場合にだけ、`unresolved-mismatch → H_vec → H = ||H_vec|| → θ` の読み取り専用 sidecar へ進む。
 canonical H / θ が安定するまでは既存 local leap の authority を置き換えない。
