@@ -20,6 +20,15 @@ from . import dialogue_local_aliases as _dialogue_local_aliases  # noqa: F401
 from .npc import VillageNPC
 from .profiles import REFERENCE_PROFILE, VILLAGE_PROFILE, Profile
 from .simulation import VillageObserver, VillageSimulation
+from .v23_authority import (
+    INSTALL_KIND,
+    INSTALL_SCOPE,
+    VillageAuthorityInstallAudit,
+    VillageCanonicalAuthority,
+    VillageCanonicalAuthorityController,
+    VillageContextObserverView,
+    install_village_canonical_authority,
+)
 from .v23_boundary import (
     VillageBoundary,
     VillageBoundaryChange,
@@ -78,6 +87,12 @@ __all__ = [
     "VillageSelectionResult",
     "VillageReconstructionProposal",
     "VillageReentryValidation",
+    "VillageAuthorityInstallAudit",
+    "VillageCanonicalAuthority",
+    "VillageCanonicalAuthorityController",
+    "VillageContextObserverView",
+    "INSTALL_KIND",
+    "INSTALL_SCOPE",
     "assess_village_mismatch",
     "attach_v23_observer",
     "review_village_candidate",
@@ -88,6 +103,7 @@ __all__ = [
     "select_village_candidate",
     "propose_village_reconstruction",
     "validate_village_reentry",
+    "install_village_canonical_authority",
     # Legacy compatibility names. These no longer define Core H/xi/B semantics.
     "Boundary",
     "HVec",
