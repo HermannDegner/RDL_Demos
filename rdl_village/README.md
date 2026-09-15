@@ -2,7 +2,7 @@
 
 RDL的NPCによる簡易村シミュレーター。Python実装、外部依存なし。
 
-> **Migration status:** 既存simulation本体は pre-v2.3 の歴史的実装を含む。現行Coreの意味基準は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3。`v23_boundary.py` にcanonicalな有限比較境界を、`v23_live_observer.py` に実runtimeへ非介入で接続するread-only sidecarを置く。legacy `LocalLoadVector / ExplorationState / LeapEngine` は現段階では行動authorityを維持する。
+> **Migration status:** 既存simulation本体は pre-v2.3 の歴史的実装を含む。現行Coreの意味基準は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3。`v23_boundary.py` にcanonical有限比較境界、`v23_live_observer.py` に実runtimeへ非介入で接続するread-only sidecar、`v23_review.py` に局所吸収証拠と有限review gateを置く。legacy `LocalLoadVector / ExplorationState / LeapEngine` は現段階では行動authorityを維持する。
 
 旧設計の参照元:
 
@@ -34,9 +34,19 @@ VillageRIBSection(t+Δ)
         ↓
 E = Δ(F, F')
         ↓
-zero-difference | pending-assessment | explicit finite classification
-        ↓ unresolved only
-canonical H candidate
+zero-difference | pending-assessment
+        ↓ separately audit current finite local model
+bounded local absorption evidence
+        ↓ review candidate only
+explicit finite review
+        ├ ordinary-temporal-change
+        ├ boundary-or-coverage-change
+        ├ resolved-difference
+        └ unresolved-mismatch (explicit dimensions only)
+                    ↓
+              H_vec → H → explicit θ
+                    ↓
+          diagnostic-only threshold state
 ```
 
 ### Stage 1: hardened finite comparison boundary
@@ -48,9 +58,10 @@ canonical H candidate
 - F と F' は同じ pre-update `model_ref` と明示係数を使う
 - place / band 等のfinite conditionsが変わった場合は比較窓を切り、Eを形成しない
 - 非ゼロEは大きさだけでは `unresolved` にならず、既定は `pending-assessment`
-- `VillageUnresolvedH` は boolean を直接受けず、finite assessment objectだけを受ける
+- `unresolved-mismatch` は未吸収dimensionを明示し、zero dimensionや範囲外dimensionをHへ入れない
+- `VillageUnresolvedH` は finite assessment objectだけを受け、reviewed unresolved componentだけを蓄積する
 
-現段階の `VillageUnresolvedH` は migration-sidecar の候補であり、legacy Leapへのauthorityは持たない。
+`VillageUnresolvedH.magnitude` の max norm と `theta` はVillage demo-localな有限具体化であり、Core唯一のnorm/定数とはしない。
 
 ### Stage 2: live read-only observer
 
@@ -75,6 +86,35 @@ print(observer.snapshot())
 係数はobserver生成時にコピーして固定する。place / band が変わればwindowを切る。observerは `LocalLoadVector / ExplorationState / LeapEngine` を読んでcanonical判定を作らず、policyにも書き戻さない。
 
 固定seedテストではobserver有無で world log / village log / agent state / RNG state が一致することを要求する。
+
+### Stage 3: bounded local absorption evidence + finite review + diagnostic H
+
+Villageには `PredictionField.integrate()` が現在地の有限な場所モデルを局所更新する既存経路がある。sidecarは次の3軸だけを監査する。
+
+- `comfort` ← `discomfort` に対応するVillage-local update
+- `social_expectation` ← `visible_agents` に対応するVillage-local update
+- `resource_expectation` ← `visible_resources` に対応するVillage-local update
+
+前tickの有限snapshotと現在の知覚から、**既存runtimeの一回分の局所更新則で到達する値**を再計算し、実値と一致した場合だけ `bounded-local-adjustment-observed` とする。別経路の構造変更が混ざれば `confounded-structural-change` とし、吸収証拠にはしない。
+
+```text
+bounded local adjustment observed
++ corresponding non-zero E dimension
+    ↓
+review candidate
+```
+
+candidateはまだ `unresolved` ではない。`body_crisis` にはこのStageで対応する局所吸収則を立てていないため、Eが非ゼロでも自動的にcandidate dimensionへ含めない。
+
+`unresolved-mismatch` に進むには、有限reviewで少なくとも次を明示する。
+
+- ordinary temporal change を除外したこと
+- boundary / coverage change を除外したこと
+- unresolved とするdimension
+- reviewer
+- finite basis
+
+reviewされた unresolved dimensionだけが sidecar `H_vec` に入り、`H >= θ` は現段階では **diagnostic-only**。legacy Leapを起動しない。
 
 ---
 
@@ -108,7 +148,7 @@ ActionBoundary.theta_effective(...) != canonical θ law
 LeapEngine != canonical H >= θ -> M_Δ authority
 ```
 
-canonical observerはこの経路へまだauthorityを持たない。
+canonical sidecarのH/θはこの経路へまだauthorityを持たない。
 
 ---
 
@@ -128,8 +168,9 @@ python -m unittest rdl_village.test_v23_boundary -v
 
 | モジュール | 内容 |
 |---|---|
-| `v23_boundary.py` | **CURRENT canonical boundary** — finite B / RIB_B / F / F' / E / assessment / unresolved H candidate |
-| `v23_live_observer.py` | **CURRENT live sidecar** — actual `simulation.step()` perceptionをread-only観測 |
+| `v23_boundary.py` | **CURRENT canonical boundary** — finite B / RIB_B / F / F' / E / dimension-specific assessment / unresolved H |
+| `v23_live_observer.py` | **CURRENT live sidecar** — actual perception / local-update audit / review candidates / diagnostic H |
+| `v23_review.py` | **CURRENT finite review gate** — bounded local absorption evidence / explicit unresolved review |
 | `core.py` | pre-v2.3動態を含む既存simulation core。local canonical-name + compatibility alias |
 | `profiles.py` | 係数プロファイルと NeuroProfile |
 | `world.py` | 時計・場所・資源循環・物理環境 |
@@ -140,7 +181,7 @@ python -m unittest rdl_village.test_v23_boundary -v
 | `npc.py` | VillageNPC と意思決定サイクル。legacy/local authorityを現状維持 |
 | `simulation.py` | tick進行・イベント配布・結果評価・非介入観測 |
 | `richness.py` | 生命らしさの測定 |
-| `test_v23_boundary.py` | canonical意味境界 + live observer非介入テスト |
+| `test_v23_boundary.py` | canonical境界 / absorption / review / live非介入テスト |
 | `test_regression.py` | 固定シードの既存挙動回帰 |
 
 ---
@@ -179,10 +220,10 @@ python -m unittest rdl_village.test_v23_boundary -v
 
 1. **DONE** — finite B / coverage / same frozen evaluator / assessment境界を硬化
 2. **DONE** — actual `simulation.step()` perceptionへread-only observerをopt-in接続
-3. **NEXT** — legacy prediction residualとは別に、current structureが局所吸収を実際に試みた有限証拠を定義
-4. post-adjustment residualを有限reviewし、`ordinary temporal change / boundary change / resolved / unresolved` を分離
-5. reviewed unresolvedだけを `H_vec -> H -> explicit θ` へ接続
-6. provenance付き `M_Δ request -> T1 Probe / Selection / M_B'` をshadow実装
+3. **DONE** — bounded local absorption attempt evidenceをlegacy H/xiから独立して監査
+4. **DONE** — explicit finite reviewでordinary temporal / boundary / resolved / unresolvedを分離
+5. **DONE (diagnostic-only)** — reviewed unresolved dimensionだけを `H_vec -> H -> explicit θ` へ接続
+6. **NEXT** — provenance付き `M_Δ request -> T1 Probe / Selection / M_B'` をshadow実装
 7. fresh re-entry validation後に、必要なauthorityだけをlegacy `LeapEngine` からcanonical経路へcutover
 8. 旧Core記号名をcompatibility層へさらに閉じ込める
 
