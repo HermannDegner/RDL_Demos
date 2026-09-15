@@ -29,6 +29,7 @@ LOCAL_ABSORPTION_STATUSES = (
     "bounded-local-adjustment-observed",
     "no-observed-local-adjustment",
     "confounded-structural-change",
+    "not-formed-missing-baseline",
     "not-formed-missing-local-state",
     "not-formed-boundary-change",
 )
@@ -120,6 +121,8 @@ def review_village_candidate(
     ``unresolved-mismatch`` is accepted only when the reviewer explicitly
     excludes ordinary temporal change and boundary / coverage change, and only
     for dimensions already supported by the bounded local-adjustment evidence.
+    Candidate evidence references are retained in the assessment basis so H
+    provenance can be reconstructed later without relying on magnitude alone.
     """
 
     if status == "unresolved-mismatch":
@@ -140,11 +143,12 @@ def review_village_candidate(
             raise ValueError("non-unresolved review cannot name unresolved dimensions")
         unresolved = ()
 
-    finite_basis = tuple(str(item) for item in basis if str(item).strip())
-    if not finite_basis:
+    reviewer_basis = tuple(str(item) for item in basis if str(item).strip())
+    if not reviewer_basis:
         raise ValueError("finite review requires a non-empty basis")
     if not assessor:
         raise ValueError("finite review requires an assessor")
+    finite_basis = tuple(dict.fromkeys(reviewer_basis + candidate.evidence_refs))
 
     return assess_village_mismatch(
         candidate.mismatch,
