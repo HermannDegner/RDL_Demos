@@ -63,7 +63,7 @@ test("operational reviewer requires repeated distinct post-adjustment windows be
   });
   observer.capture({
     tick: 5,
-    observed: { resource: 1, danger: 0.1, motion: 0.5 },
+    observed: { resource: 0.8, danger: 0.1, motion: 0.5 },
     reliability: { ...reliability, resource: reliability.resource - 0.02 },
   });
   runtime.reviewer.beforeReplan(rabbit, 5);
