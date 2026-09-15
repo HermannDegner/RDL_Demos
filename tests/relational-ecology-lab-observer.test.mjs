@@ -32,6 +32,9 @@ test("actual Rabbit and Predator windows are observed without changing seeded ev
       assert.ok(Object.keys(entry.assessmentCounts).every(
         (status) => status === "pending-assessment" || status === "zero-difference",
       ));
+      // Runtime wiring for prediction-check evidence is deliberately a later step.
+      assert.equal(entry.predictionChecks, 0);
+      assert.deepEqual(entry.predictionEvidenceCounts, {});
     }
     assert.ok(normal.v23Snapshot().every((entry) => entry === null));
   }
@@ -54,6 +57,92 @@ test("later observation uses earlier copied coefficients despite live adaptation
   assert.equal(result.assessment.eligibleForH, false);
   assert.equal(observer.snapshot().assessmentCounts["pending-assessment"], 1);
   assert.equal(observer.snapshot().H, undefined);
+});
+
+test("reacquired prediction match can resolve a non-zero temporal E", () => {
+  const observer = new LivingFieldObserver({ agentRef: "rabbit:0", dimensions: ["resource"] });
+  observer.capture({
+    tick: 1,
+    observed: { resource: 0.2 },
+    reliability: { resource: 0.5 },
+  });
+  observer.beginPredictionWindow({
+    tick: 1,
+    prediction: { resource: 0.8 },
+    reliability: { resource: 0.5 },
+  });
+
+  const liveReliability = { resource: 0.9 };
+  const result = observer.capture({
+    tick: 2,
+    observed: { resource: 0.8 },
+    reliability: liveReliability,
+  });
+
+  assert.ok(result.E.magnitude > 0);
+  assert.equal(result.predictionEvidence.status, "prediction-matched-observation");
+  assert.equal(result.predictionEvidence.coefficients.resource, 0.5);
+  assert.equal(result.predictionEvidence.weightedPrediction.resource, 0.4);
+  assert.equal(result.predictionEvidence.weightedObserved.resource, 0.4);
+  assert.equal(result.predictionEvidence.magnitude, 0);
+  assert.equal(result.status, "resolved-difference");
+  assert.equal(result.assessment.eligibleForH, false);
+  assert.equal(result.assessment.provenance.source, "living-field-prediction-check");
+  assert.equal(observer.snapshot().predictionChecks, 1);
+  assert.equal(observer.snapshot().predictionEvidenceCounts["prediction-matched-observation"], 1);
+});
+
+test("prediction residual remains pending regardless of magnitude", () => {
+  const observer = new LivingFieldObserver({ agentRef: "rabbit:0", dimensions: ["danger"] });
+  observer.capture({
+    tick: 1,
+    observed: { danger: 0.1 },
+    reliability: { danger: 0.8 },
+  });
+  observer.beginPredictionWindow({
+    tick: 1,
+    prediction: { danger: 0 },
+    reliability: { danger: 0.8 },
+  });
+  const result = observer.capture({
+    tick: 2,
+    observed: { danger: 1 },
+    reliability: { danger: 0.8 },
+  });
+
+  assert.equal(result.predictionEvidence.status, "prediction-residual-present");
+  assert.equal(result.predictionEvidence.magnitude, 0.8);
+  assert.equal(result.status, "pending-assessment");
+  assert.equal(result.assessment.eligibleForH, false);
+  assert.equal(observer.snapshot().assessmentCounts["pending-assessment"], 1);
+});
+
+test("incomplete prediction evidence does not invent a zero or unresolved result", () => {
+  const observer = new LivingFieldObserver({
+    agentRef: "rabbit:0",
+    dimensions: ["resource", "danger"],
+  });
+  observer.capture({
+    tick: 1,
+    observed: { resource: 0.2, danger: 0.1 },
+    reliability: { resource: 0.7, danger: 0.8 },
+  });
+  const staged = observer.beginPredictionWindow({
+    tick: 1,
+    prediction: { resource: 0.4 },
+    reliability: { resource: 0.7, danger: 0.8 },
+  });
+  assert.equal(staged.status, "not-formed-missing-prediction");
+
+  const result = observer.capture({
+    tick: 2,
+    observed: { resource: 0.7, danger: 0.6 },
+    reliability: { resource: 0.7, danger: 0.8 },
+  });
+  assert.equal(result.predictionEvidence.status, "not-formed-missing-prediction");
+  assert.deepEqual(result.predictionEvidence.missingDimensions, ["danger"]);
+  assert.equal(result.status, "pending-assessment");
+  assert.equal(result.assessment.eligibleForH, false);
 });
 
 test("observer accepts explicit evidence-backed classification without creating H", () => {
@@ -99,6 +188,7 @@ test("diagnostic snapshots are immutable and isolated between agents and episode
   const snapshot = simulation.v23Snapshot();
   assert.throws(() => { snapshot[0].samples = 999; }, TypeError);
   assert.throws(() => { snapshot[0].assessmentCounts.fake = 999; }, TypeError);
+  assert.throws(() => { snapshot[0].predictionEvidenceCounts.fake = 999; }, TypeError);
   assert.notStrictEqual(simulation.rabbits[0].v23Observer, simulation.rabbits[1].v23Observer);
   const old = simulation.rabbits[0].v23Observer;
   simulation.createEpisode();
