@@ -22,11 +22,16 @@ from .profiles import REFERENCE_PROFILE, VILLAGE_PROFILE, Profile
 from .simulation import VillageObserver, VillageSimulation
 from .v23_boundary import (
     VillageBoundary,
-    VillageRIBSection,
+    VillageBoundaryChange,
+    VillageCoverageError,
+    VillageDifferenceAssessment,
     VillageInterpretation,
     VillageMismatch,
+    VillageRIBSection,
     VillageUnresolvedH,
+    assess_village_mismatch,
 )
+from .v23_live_observer import VillageCanonicalObserver, attach_v23_observer
 from .world import PhysicalWorld, VillageClock
 
 __all__ = [
@@ -37,10 +42,16 @@ __all__ = [
     "LeapEngine",
     "Phase",
     "VillageBoundary",
+    "VillageBoundaryChange",
+    "VillageCoverageError",
+    "VillageDifferenceAssessment",
     "VillageRIBSection",
     "VillageInterpretation",
     "VillageMismatch",
     "VillageUnresolvedH",
+    "VillageCanonicalObserver",
+    "assess_village_mismatch",
+    "attach_v23_observer",
     # Legacy compatibility names. These no longer define Core H/xi/B semantics.
     "Boundary",
     "HVec",
