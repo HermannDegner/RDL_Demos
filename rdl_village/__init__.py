@@ -61,6 +61,11 @@ from .v23_review import (
     VillageUnresolvedReviewCandidate,
     review_village_candidate,
 )
+from .v23_runtime import (
+    VillageCanonicalRuntimeDriver,
+    VillageCanonicalRuntimeSession,
+    install_village_canonical_runtime,
+)
 from .world import PhysicalWorld, VillageClock
 
 __all__ = [
@@ -91,6 +96,8 @@ __all__ = [
     "VillageCanonicalAuthority",
     "VillageCanonicalAuthorityController",
     "VillageContextObserverView",
+    "VillageCanonicalRuntimeDriver",
+    "VillageCanonicalRuntimeSession",
     "INSTALL_KIND",
     "INSTALL_SCOPE",
     "assess_village_mismatch",
@@ -104,6 +111,7 @@ __all__ = [
     "propose_village_reconstruction",
     "validate_village_reentry",
     "install_village_canonical_authority",
+    "install_village_canonical_runtime",
     # Legacy compatibility names. These no longer define Core H/xi/B semantics.
     "Boundary",
     "HVec",
