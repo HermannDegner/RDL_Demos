@@ -26,15 +26,43 @@ test("actual Rabbit and Predator windows are observed without changing seeded ev
     assert.ok(snapshots.some((entry) => entry.agentRef.startsWith("rabbit:") && entry.comparisons > 0));
     assert.ok(snapshots.some((entry) => entry.agentRef.startsWith("predator:") && entry.comparisons > 0));
     assert.ok(snapshots.every((entry) => !entry.dimensions.includes("attack")));
+    assert.ok(snapshots.some((entry) => entry.predictionChecks > 0));
+    assert.ok(snapshots.some((entry) => entry.localAbsorptionAttempts > 0));
     for (const entry of snapshots) {
       const assessed = Object.values(entry.assessmentCounts).reduce((sum, count) => sum + count, 0);
       assert.equal(assessed, entry.comparisons);
       assert.ok(Object.keys(entry.assessmentCounts).every(
-        (status) => status === "pending-assessment" || status === "zero-difference",
+        (status) => status === "pending-assessment"
+          || status === "zero-difference"
+          || status === "resolved-difference",
       ));
-      // Runtime wiring for prediction-check evidence is deliberately a later step.
-      assert.equal(entry.predictionChecks, 0);
-      assert.deepEqual(entry.predictionEvidenceCounts, {});
+      assert.equal(entry.assessmentCounts["unresolved-mismatch"] ?? 0, 0);
+
+      const checked = Object.values(entry.predictionEvidenceCounts)
+        .reduce((sum, count) => sum + count, 0);
+      assert.equal(checked, entry.predictionChecks);
+      assert.ok(Object.keys(entry.predictionEvidenceCounts).every(
+        (status) => status === "prediction-matched-observation"
+          || status === "prediction-residual-present"
+          || status === "prediction-residual-after-bounded-local-adjustment"
+          || status === "not-formed-missing-prediction"
+          || status === "not-formed-missing-observation",
+      ));
+
+      const localChecks = Object.values(entry.localUpdateEvidenceCounts)
+        .reduce((sum, count) => sum + count, 0);
+      assert.equal(localChecks, entry.localUpdateChecks);
+      assert.ok(Object.keys(entry.localUpdateEvidenceCounts).every(
+        (status) => status === "bounded-local-adjustment-observed"
+          || status === "no-observed-local-adjustment"
+          || status === "confounded-structural-change"
+          || status === "not-formed-missing-local-coefficient",
+      ));
+      assert.equal(
+        entry.localAbsorptionAttempts,
+        entry.localUpdateEvidenceCounts["bounded-local-adjustment-observed"] ?? 0,
+      );
+      if (entry.samples > 0) assert.ok(entry.predictionChecks > 0);
     }
     assert.ok(normal.v23Snapshot().every((entry) => entry === null));
   }
@@ -117,6 +145,73 @@ test("prediction residual remains pending regardless of magnitude", () => {
   assert.equal(observer.snapshot().assessmentCounts["pending-assessment"], 1);
 });
 
+test("bounded local coefficient adjustment is finite absorption-attempt evidence only", () => {
+  const observer = new LivingFieldObserver({ agentRef: "rabbit:0", dimensions: ["danger"] });
+  observer.capture({
+    tick: 1,
+    observed: { danger: 0.1 },
+    reliability: { danger: 0.8 },
+  });
+  const staged = observer.beginPredictionWindow({
+    tick: 1,
+    prediction: { danger: 0 },
+    reliability: { danger: 0.79 },
+  });
+
+  assert.equal(staged.localAbsorptionAttempt.status, "bounded-local-adjustment-observed");
+  assert.equal(staged.localAbsorptionAttempt.qualifiesAsFiniteAttempt, true);
+  assert.deepEqual(staged.localAbsorptionAttempt.changedDimensions, ["danger"]);
+  assert.equal(staged.localAbsorptionAttempt.beforeCoefficients.danger, 0.8);
+  assert.equal(staged.localAbsorptionAttempt.afterCoefficients.danger, 0.79);
+
+  const result = observer.capture({
+    tick: 2,
+    observed: { danger: 1 },
+    reliability: { danger: 0.79 },
+  });
+  assert.equal(
+    result.predictionEvidence.status,
+    "prediction-residual-after-bounded-local-adjustment",
+  );
+  assert.equal(result.predictionEvidence.residualAfterFiniteAbsorptionAttempt, true);
+  assert.equal(result.predictionEvidence.localAbsorptionAttempt.captureTick, 1);
+  assert.equal(result.status, "pending-assessment");
+  assert.equal(result.assessment.eligibleForH, false);
+  assert.equal(observer.snapshot().localAbsorptionAttempts, 1);
+  assert.equal(
+    observer.snapshot().localUpdateEvidenceCounts["bounded-local-adjustment-observed"],
+    1,
+  );
+});
+
+test("structural change outside the bounded local updater is excluded from absorption evidence", () => {
+  const observer = new LivingFieldObserver({ agentRef: "rabbit:0", dimensions: ["danger"] });
+  observer.capture({
+    tick: 1,
+    observed: { danger: 0.1 },
+    reliability: { danger: 0.8 },
+  });
+  const staged = observer.beginPredictionWindow({
+    tick: 1,
+    prediction: { danger: 0 },
+    reliability: { danger: 0.6 },
+  });
+
+  assert.equal(staged.localAbsorptionAttempt.status, "confounded-structural-change");
+  assert.equal(staged.localAbsorptionAttempt.qualifiesAsFiniteAttempt, false);
+  assert.deepEqual(staged.localAbsorptionAttempt.confoundedDimensions, ["danger"]);
+
+  const result = observer.capture({
+    tick: 2,
+    observed: { danger: 1 },
+    reliability: { danger: 0.6 },
+  });
+  assert.equal(result.predictionEvidence.status, "prediction-residual-present");
+  assert.equal(result.status, "pending-assessment");
+  assert.equal(result.assessment.eligibleForH, false);
+  assert.equal(observer.snapshot().localAbsorptionAttempts, 0);
+});
+
 test("incomplete prediction evidence does not invent a zero or unresolved result", () => {
   const observer = new LivingFieldObserver({
     agentRef: "rabbit:0",
@@ -189,6 +284,7 @@ test("diagnostic snapshots are immutable and isolated between agents and episode
   assert.throws(() => { snapshot[0].samples = 999; }, TypeError);
   assert.throws(() => { snapshot[0].assessmentCounts.fake = 999; }, TypeError);
   assert.throws(() => { snapshot[0].predictionEvidenceCounts.fake = 999; }, TypeError);
+  assert.throws(() => { snapshot[0].localUpdateEvidenceCounts.fake = 999; }, TypeError);
   assert.notStrictEqual(simulation.rabbits[0].v23Observer, simulation.rabbits[1].v23Observer);
   const old = simulation.rabbits[0].v23Observer;
   simulation.createEpisode();
