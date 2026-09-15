@@ -10,7 +10,8 @@ canonical roles separate from those mechanisms:
   coefficient set;
 - missing coverage never becomes numeric zero;
 - non-zero E is pending unless a finite assessment classifies it;
-- only explicitly assessed unresolved mismatch is eligible for canonical H.
+- unresolved review is dimension-specific;
+- only explicitly reviewed unresolved components are eligible for canonical H.
 
 This module does not grant reconstruction authority to the historical village
 ``LeapEngine``.
@@ -153,6 +154,10 @@ class VillageMismatch:
 
         return max((abs(value) for value in self.values.values()), default=0.0)
 
+    @property
+    def nonzero_dimensions(self) -> tuple[str, ...]:
+        return tuple(key for key in self.dimensions if abs(self.values.get(key, 0.0)) > 0.0)
+
 
 @dataclass(frozen=True)
 class VillageDifferenceAssessment:
@@ -160,24 +165,52 @@ class VillageDifferenceAssessment:
     status: str
     basis: tuple[str, ...] = ()
     assessor: Optional[str] = None
+    unresolved_dimensions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in ASSESSMENT_STATUSES:
             raise ValueError(f"unknown village assessment status: {self.status}")
         basis = tuple(str(item) for item in self.basis if str(item).strip())
+        unresolved = tuple(str(item) for item in self.unresolved_dimensions)
         object.__setattr__(self, "basis", basis)
+        object.__setattr__(self, "unresolved_dimensions", unresolved)
+
         if self.mismatch.magnitude == 0.0 and self.status != "zero-difference":
             raise ValueError("zero E cannot be classified as a non-zero assessment")
         if self.mismatch.magnitude > 0.0 and self.status == "zero-difference":
             raise ValueError("non-zero E cannot be classified as zero-difference")
         if self.status not in {"zero-difference", "pending-assessment"} and not basis:
             raise ValueError("explicit non-zero assessment requires a finite basis")
-        if self.status == "unresolved-mismatch" and not self.assessor:
-            raise ValueError("unresolved assessment requires an explicit assessor")
+
+        if self.status == "unresolved-mismatch":
+            if not self.assessor:
+                raise ValueError("unresolved assessment requires an explicit assessor")
+            if not unresolved:
+                raise ValueError("unresolved assessment requires explicit unresolved dimensions")
+            if len(set(unresolved)) != len(unresolved):
+                raise ValueError("unresolved dimensions must be unique")
+            invalid = set(unresolved) - set(self.mismatch.dimensions)
+            if invalid:
+                raise ValueError(f"unresolved dimensions outside finite E: {sorted(invalid)}")
+            zero = tuple(
+                key for key in unresolved if abs(self.mismatch.values.get(key, 0.0)) == 0.0
+            )
+            if zero:
+                raise ValueError(f"zero E dimensions cannot be unresolved: {zero}")
+        elif unresolved:
+            raise ValueError("only unresolved-mismatch may name unresolved dimensions")
 
     @property
     def eligible_for_h(self) -> bool:
         return self.status == "unresolved-mismatch"
+
+    @property
+    def unresolved_values(self) -> Mapping[str, float]:
+        if not self.eligible_for_h:
+            return MappingProxyType({})
+        return MappingProxyType(
+            {key: self.mismatch.values[key] for key in self.unresolved_dimensions}
+        )
 
 
 class VillageUnresolvedH:
@@ -186,23 +219,32 @@ class VillageUnresolvedH:
     def __init__(self, theta: float = 1.0, decay: float = 1.0) -> None:
         self.theta = float(theta)
         self.decay = float(decay)
+        if not math.isfinite(self.theta) or self.theta < 0.0:
+            raise ValueError("theta must be a finite non-negative demo-local threshold")
+        if not math.isfinite(self.decay) or not 0.0 <= self.decay <= 1.0:
+            raise ValueError("decay must be finite and within [0, 1]")
         self.values: dict[str, float] = {}
 
     def observe(self, assessment: VillageDifferenceAssessment) -> None:
         mismatch = assessment.mismatch
         keys = set(self.values) | set(mismatch.values)
+        unresolved = assessment.unresolved_values
         self.values = {
             key: self.values.get(key, 0.0) * self.decay
-            + (abs(mismatch.values.get(key, 0.0)) if assessment.eligible_for_h else 0.0)
+            + abs(unresolved.get(key, 0.0))
             for key in keys
         }
 
     @property
     def magnitude(self) -> float:
+        """Demo-local max norm for the Village sidecar."""
+
         return max(self.values.values(), default=0.0)
 
     @property
     def should_reconstruct(self) -> bool:
+        """Diagnostic threshold crossing only; this class has no runtime authority."""
+
         return self.magnitude >= self.theta
 
 
@@ -318,6 +360,7 @@ def assess_village_mismatch(
     status: Optional[str] = None,
     basis: Sequence[str] = (),
     assessor: Optional[str] = None,
+    unresolved_dimensions: Sequence[str] = (),
 ) -> VillageDifferenceAssessment:
     """Classify finite E without promoting magnitude to unresolved by itself."""
 
@@ -330,4 +373,5 @@ def assess_village_mismatch(
         status=resolved_status,
         basis=tuple(basis),
         assessor=assessor,
+        unresolved_dimensions=tuple(unresolved_dimensions),
     )
