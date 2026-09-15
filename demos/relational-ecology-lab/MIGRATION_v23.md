@@ -104,7 +104,7 @@ prediction-check residual
 したがって prediction-check は、後から更新された係数へ追随せず、形成時点の有限な係数を保持する。
 
 この residual は Core E ではなく、E を assessment するための有限な補助証拠である。
-したがって次の非対称な規則だけを現段階で許す。
+したがって次の非対称な規則だけを許す。
 
 - prediction-check residual が **0** で、同じ選択次元・凍結係数の予測が後続観測と一致した場合、非ゼロ temporal E を `resolved-difference` とする有限根拠になりうる。
 - prediction-check residual が非ゼロであっても、その大きさだけでは `unresolved-mismatch` に昇格させない。`pending-assessment` のまま残す。
@@ -112,6 +112,40 @@ prediction-check residual
 - prediction-check は legacy H / xi / thetaEffective を参照しない。
 - prediction-check 自体は H を作らず、行動を変えない。
 - observer は decision object を保持せず、選択次元の prediction と reliability のコピーだけを保持する。
+
+## 局所吸収試行の有限証拠
+
+prediction residual が残ったことだけでは、「現在構造が吸収を試みたが解消できなかった」とは言えない。
+そこで sidecar は、ある `capture()` で取得した更新前 reliability と、次の `plan()` が prediction window を形成するときに見える reliability の間だけを有限に監査する。
+
+```text
+capture at t
+  ↓ copied selected reliability
+pre-update coefficient section
+  ↓ existing runtime performs its own local processing
+next plan at t or later
+  ↓ selected reliability reacquired
+coefficient transition audit
+  ├─ bounded-local-adjustment-observed
+  ├─ no-observed-local-adjustment
+  ├─ confounded-structural-change
+  └─ not-formed-missing-local-coefficient
+```
+
+`bounded-local-adjustment-observed` は、現在の Living Field 実装にある reliability の局所更新1回で到達可能な有限幅に変化が収まっている場合だけ形成する。
+監査契約は現行 demo-local 実装の `rate=0.035` と reliability 範囲 `[0.18, 0.98]` を写したものであり、Core の普遍法則でも `M_B` 全体でもない。
+
+重要な境界は次の通り。
+
+- legacy prediction error の値そのものをこの証拠へ入れない。
+- legacy H / xi / thetaEffective を参照しない。
+- reliability の変化が局所更新1回で説明できる有限幅を外れた場合は `confounded-structural-change` とし、legacy leap その他の構造変更と区別不能なので吸収試行証拠にしない。
+- 係数変化が観測されなければ `no-observed-local-adjustment` とし、「吸収した」と捏造しない。
+- `bounded-local-adjustment-observed` は **局所吸収を試みた候補証拠**であり、吸収成功の証拠ではない。
+- その後の prediction-check で residual が残った場合は `prediction-residual-after-bounded-local-adjustment` として保持するが、なお `pending-assessment` のままである。
+- つまり `局所更新が観測された + 後続 residual が残った` だけでも、自動 `unresolved-mismatch` にはしない。
+
+この非対称性により、現在構造が実際に局所変形を行った形跡と、その後にも差が観測されたことを分けて記録できる一方、通常の時間変化や境界変化を「未解消不整合」と誤認することを避ける。
 
 この配線は `observeV23=true` の場合だけ有効であり、observer の返値は policy から読まれない。
 したがって watched / unwatched simulation の seeded evolution、decision、memory、reliability、legacy local load、event、RNG は一致し続ける必要がある。
@@ -136,7 +170,7 @@ attack は今後、試行した / していない、接触した / 逸脱した�
 
 Rabbit / Predator の両方で実比較が発生すること、欠測時に比較窓が切れること、以前の係数が凍結されること、snapshot が読み取り専用であることも検証する。
 
-assessment / prediction-check については追加で次を固定する。
+assessment / prediction-check / local update audit については追加で次を固定する。
 
 - 非ゼロ E は根拠なしで `pending-assessment` に留まる
 - 明示分類は basis を要求する
@@ -149,13 +183,16 @@ assessment / prediction-check については追加で次を固定する。
 - prediction residual は大きくても自動 unresolved にしない
 - prediction の欠測をゼロ扱いしない
 - 実働 Rabbit / Predator で prediction-check が発生する
+- 更新前後の reliability 変化が局所更新契約の有限幅に収まる場合だけ absorption-attempt 候補として数える
+- 有限幅を外れる構造変化は confounded とし、吸収試行扱いしない
+- bounded local adjustment 後に residual が残っても自動 unresolved にしない
 - 実配線後も自動 `unresolved-mismatch` は発生せず、seeded evolution は不変
 
 ## 次段階
 
-次に必要なのは、prediction residual が存在するとき、**現在の有限構造がその差を局所的に吸収・解消しようとしたか、その試行後にも何が残ったか**を示す別の有限証拠である。
-prediction residual 自体や legacy local load をその証拠へ昇格させてはいけない。
+現在は、`prediction residual` と `bounded local adjustment` と `post-adjustment residual` を別々の有限証拠として取得できる。
+次に必要なのは、post-adjustment residual が **同じ B・Purpose・対象次元のもとで、通常の時間変化や coverage 変更ではなく、現在構造で吸収しきれず残った不整合である**と判定する有限な review 条件である。
 
-候補となる証拠は、同じ B・Purpose・対象次元・更新前モデルとの対応を保持しながら、局所更新前後を明示的に区別できなければならない。
-その証拠が固定できた場合にだけ、`unresolved-mismatch → H_vec → H = ||H_vec|| → θ` の読み取り専用 sidecar へ進む。
+その review 条件は、残差の大きさだけではなく、少なくとも比較対象の同一性、境界継続性、観測成立、局所更新試行の対応を保持しなければならない。
+これが固定できた場合にだけ、`unresolved-mismatch → H_vec → H = ||H_vec|| → θ` の読み取り専用 sidecar へ進む。
 canonical H / θ が安定するまでは既存 local leap の authority を置き換えない。
