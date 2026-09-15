@@ -42,7 +42,13 @@ explicit assessment gate
              ↓ demo-local L2 finite concretization
            H = ||H_vec||
              ↓ explicit diagnostic θ
-         reconstruct? (diagnostic only)
+          H >= θ ?
+             ↓ yes
+        M_Δ request
+             ↓ explicit current M_B binding only
+        T1 handoff (read-only)
+             ↓
+        Probe / Selection / Reconstruction are still not executed
 ```
 
 - `evaluateDecision` が作る正規化済み `observed` を有限作用断面の実装近似として取得する。
@@ -144,8 +150,45 @@ shouldReconstruct (diagnostic only)
 - θ は sidecar 作成時に明示指定し、legacy thetaEffective から取得しない。
 - 異なる B / Purpose / dimensions の review を同じ H に蓄積しない。
 - context 不一致による拒否は atomic で、H・count・last review を変更しない。
-- `shouldReconstruct` は診断値であり、M_Δ や policy を起動しない。
+- `shouldReconstruct` は診断値であり、それ自体では policy を起動しない。
 - Core ξ を数値化しない。
+
+## M_Δ request / T1 handoff
+
+T0 の最低動作では `H >= θ` が再編相 `M_Δ` への移行条件になる。一方、既存 `M_B` の対象化、Probe、Selection、`M_B'` 再構成は T1 の責務である。
+Living Field ではこの境界を `v23_mdelta_request.mjs` に分離する。
+
+```text
+LivingFieldHSidecar
+    ↓ H >= θ
+requestMDelta()
+    ↓
+MDeltaRequest
+    ├─ same finite context
+    ├─ H_vec / H / θ / normRef
+    ├─ finite unresolved review provenance
+    ├─ subjectRef = null
+    ├─ reconstructionTargetRef = null
+    └─ reconstructedModelRef = null
+          ↓ explicit binding only
+bindMDeltaSubject()
+          ↓
+MDeltaT1Handoff
+    ├─ explicit current M_B subjectRef
+    ├─ subjectRole = SILN_SELF-current-M_B
+    ├─ reconstructionTargetRef = null
+    ├─ selectionStatus = not-performed
+    └─ authority = T1-handoff-only
+```
+
+- `requestMDelta()` は `H < θ` では形成できない。
+- request に渡す unresolved review 集合は H sidecar の `unresolvedReviews` 件数と一致し、同じ有限 context でなければならない。
+- review から再構成した `H_vec` が sidecar の現在 `H_vec` と一致しない場合、request を拒否する。これにより provenance の欠落した threshold claim を作らない。
+- request 自体は現在 `M_B` の具体参照を推測しない。`subjectRef` は `null` のまま保持する。
+- T1へ渡すときだけ `bindMDeltaSubject()` で現在の `M_B` を明示的に `SILN_SELF` として束縛する。
+- `M_B'`、再構成 target、Selection 結果は一切発明しない。これらは T1 の Probe / Selection / Reconstruction が別途形成する。
+- request / handoff は policy を変えず、legacy leap の authority を持たない。
+- numeric ξ フィールドを作らない。
 
 ## attack を分離する理由
 
@@ -178,12 +221,15 @@ attack は今後、試行した / していない、接触した / 逸脱した�
 - generic assessment / legacy numeric state は Living Field H sidecar に入らない
 - reviewed unresolved だけが H_vec を更新する
 - H sidecar は異なる有限 context を混合しない
-- sidecar の `shouldReconstruct` は diagnostic-only で policy を変えない
+- sidecar の `shouldReconstruct` は policy を変えない
+- `H < θ` では M_Δ request を作れない
+- M_Δ request の review provenance が H_vec を再現できなければ拒否する
+- M_Δ request は `M_B'` や reconstruction target を作らない
+- T1 handoff は current M_B の明示 subject binding だけを許し、Selection / Reconstruction を実行しない
 
 ## 次段階
 
-観測・E・局所吸収試行・有限review・read-only H/θ までの境界は固定した。
-次は authority cutover の前段として、`shouldReconstruct` が成立したときに **何を M_Δ request として切り出すか**を別の有限契約にする。
+T0側の canonical 経路は、実観測から `E → reviewed unresolved → H_vec → H → θ → M_Δ request → T1 handoff` まで read-only で接続した。
 
-その request は target を勝手に発明せず、review provenance と有限 context を保持し、既存 legacy leap とは独立した read-only proposal から始める。
-proposal が安定するまで既存 local leap の authority は置き換えない。
+残る Living Field 本体の大工程は **authority cutover** である。ただし、その前に T1 側で `MDeltaT1Handoff` から Probe / Selection / Reconstruction proposal を形成し、`M_B'` を有限根拠付きで返せる経路を独立検証する必要がある。
+その経路が安定するまで既存 local leap の authority は置き換えない。
