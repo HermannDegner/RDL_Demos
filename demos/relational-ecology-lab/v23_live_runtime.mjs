@@ -7,10 +7,6 @@
 import { Simulation } from "./core.mjs";
 import { installCompleteLivingFieldAuthority } from "./v23_complete_authority.mjs";
 
-function nonEmpty(value) {
-  return String(value ?? "").trim();
-}
-
 function finiteContext(comparison) {
   const context = comparison?.earlierSection?.context;
   return Object.freeze({
@@ -127,11 +123,8 @@ export class LivingFieldOperationalReviewer {
       return;
     }
     let streak = this.generalStreaks.get(agent.focusKey) ?? newStreak();
-    if (
-      streak.lastEvidenceKey === evidenceKey
-      || streak.dimension !== dimension
-      || !sameContext(streak.context, context)
-    ) {
+    if (streak.lastEvidenceKey === evidenceKey) return;
+    if (streak.dimension !== dimension || !sameContext(streak.context, context)) {
       streak = newStreak();
       streak.dimension = dimension;
       streak.context = context;
@@ -185,11 +178,8 @@ export class LivingFieldOperationalReviewer {
 
     const context = finiteContext(comparison);
     let streak = this.attackStreak;
-    if (
-      streak.lastEvidenceKey === evidenceKey
-      || streak.dimension !== "attack"
-      || !sameContext(streak.context, context)
-    ) {
+    if (streak.lastEvidenceKey === evidenceKey) return;
+    if (streak.dimension !== "attack" || !sameContext(streak.context, context)) {
       streak = newStreak();
       streak.dimension = "attack";
       streak.context = context;
