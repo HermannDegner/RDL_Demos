@@ -56,11 +56,13 @@ from .v23_mdelta_t1 import (
     snapshot_village_subject_slice,
     validate_village_reentry,
 )
+from .v23_operational import VillageOperationalCoverage, install_village_operational_coverage
 from .v23_review import (
     VillageLocalAbsorptionEvidence,
     VillageUnresolvedReviewCandidate,
     review_village_candidate,
 )
+from .v23_review_assist import VillageReviewAdvisor, VillageReviewRecommendation
 from .v23_runtime import (
     VillageCanonicalRuntimeDriver,
     VillageCanonicalRuntimeSession,
@@ -86,6 +88,8 @@ __all__ = [
     "VillageCanonicalObserver",
     "VillageLocalAbsorptionEvidence",
     "VillageUnresolvedReviewCandidate",
+    "VillageReviewRecommendation",
+    "VillageReviewAdvisor",
     "VillageMDeltaRequest",
     "VillageMDeltaT1Handoff",
     "VillageProbeEvidence",
@@ -98,6 +102,7 @@ __all__ = [
     "VillageContextObserverView",
     "VillageCanonicalRuntimeDriver",
     "VillageCanonicalRuntimeSession",
+    "VillageOperationalCoverage",
     "INSTALL_KIND",
     "INSTALL_SCOPE",
     "assess_village_mismatch",
@@ -112,6 +117,7 @@ __all__ = [
     "validate_village_reentry",
     "install_village_canonical_authority",
     "install_village_canonical_runtime",
+    "install_village_operational_coverage",
     # Legacy compatibility names. These no longer define Core H/xi/B semantics.
     "Boundary",
     "HVec",
