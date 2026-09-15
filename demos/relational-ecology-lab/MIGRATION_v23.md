@@ -50,7 +50,7 @@ explicit assessment gate
 - 明示分類には `basis` を必須とする。`unresolved-mismatch` も根拠なしには形成できない。
 - `unresolved-mismatch` だけが `eligibleForH=true`。それ以外の分類は H 候補にしない。
 - `pending-assessment` のまま H 更新を試みると拒否する。E 全体から H への暗黙短絡を許さない。
-- 現在の実働 Rabbit / Predator 呼出しは assessment 根拠をまだ渡していないため、実行中に自動で unresolved を生成しない。
+- 実働 Rabbit / Predator では prediction-check による `resolved-difference` まで自動形成しうるが、prediction residual から `unresolved-mismatch` は自動生成しない。
 - この段階では H_vec への加算、scalar H、θ 判定、M_Δ、行動変更を接続しない。
 - 欠測・非有限値があれば比較窓を切り、ゼロで補完しない。
 - 最新比較と分類件数だけを保持し、履歴を無制限に蓄積しない。
@@ -83,10 +83,12 @@ E != 0
 ## prediction-check evidence
 
 legacy `error = |observed - decision.prediction|` を canonical E として流用しない。
-代わりに、予測が形成された時点の有限な prediction と reliability をコピーし、後続観測時に別の検査断面として再比較できる `beginPredictionWindow()` / prediction-check を sidecar に追加する。
+代わりに、予測が形成された時点の有限な prediction と reliability をコピーし、後続観測時に別の検査断面として再比較する `beginPredictionWindow()` / prediction-check を sidecar に接続する。
 
 ```text
-prediction-window start
+Rabbit / Predator plan()
+    ↓ decision prediction formed
+beginPredictionWindow()
     ↓ copy selected prediction + coefficients
 finite prediction snapshot
     ↓ later observed window
@@ -97,6 +99,10 @@ weighted prediction / weighted observation
 prediction-check residual
 ```
 
+実働配線では Rabbit / Predator の `this.decision` 形成直後に prediction とその時点の reliability を observer 内へコピーする。
+後続 `evaluateDecision()` では、legacy `recordPredictionErrors()` が reliability を更新する前に既存 `capture()` が prediction window を消費する。
+したがって prediction-check は、後から更新された係数へ追随せず、形成時点の有限な係数を保持する。
+
 この residual は Core E ではなく、E を assessment するための有限な補助証拠である。
 したがって次の非対称な規則だけを現段階で許す。
 
@@ -105,8 +111,10 @@ prediction-check residual
 - prediction または必要係数が欠ける場合、検査は `not-formed-missing-prediction` として保持し、ゼロや unresolved を捏造しない。
 - prediction-check は legacy H / xi / thetaEffective を参照しない。
 - prediction-check 自体は H を作らず、行動を変えない。
+- observer は decision object を保持せず、選択次元の prediction と reliability のコピーだけを保持する。
 
-この段階では evidence API とテストだけを固定し、実働 Rabbit / Predator から prediction-window を開始する配線はまだ行わない。これにより、現在の seeded evolution と authority は完全に不変のまま、次段の実配線を独立に検査できる。
+この配線は `observeV23=true` の場合だけ有効であり、observer の返値は policy から読まれない。
+したがって watched / unwatched simulation の seeded evolution、decision、memory、reliability、legacy local load、event、RNG は一致し続ける必要がある。
 
 ## attack を分離する理由
 
@@ -140,13 +148,14 @@ assessment / prediction-check については追加で次を固定する。
 - prediction と後続観測が一致した場合だけ、自動 `resolved-difference` の根拠として使える
 - prediction residual は大きくても自動 unresolved にしない
 - prediction の欠測をゼロ扱いしない
-- evidence API を追加しても、未配線の実働 simulation は従来どおり pending / zero のみであり、seeded evolution は不変
+- 実働 Rabbit / Predator で prediction-check が発生する
+- 実配線後も自動 `unresolved-mismatch` は発生せず、seeded evolution は不変
 
 ## 次段階
 
-次は、実働 Rabbit / Predator が新しい decision window を形成した直後に、その window の prediction と更新前係数を sidecar へ渡す配線を行う。
-その配線では decision object 自体や既存 snapshot schema を変更せず、observer 内部へコピーするだけにする。
+次に必要なのは、prediction residual が存在するとき、**現在の有限構造がその差を局所的に吸収・解消しようとしたか、その試行後にも何が残ったか**を示す別の有限証拠である。
+prediction residual 自体や legacy local load をその証拠へ昇格させてはいけない。
 
-実配線後も、prediction residual 非ゼロから unresolved への自動昇格は禁止したままにする。
-その後、現在構造による局所吸収を実際に試みたことを示す別の有限証拠を設計できた場合にだけ、`unresolved-mismatch → H_vec → H = ||H_vec|| → θ` の読み取り専用 sidecar へ進む。
+候補となる証拠は、同じ B・Purpose・対象次元・更新前モデルとの対応を保持しながら、局所更新前後を明示的に区別できなければならない。
+その証拠が固定できた場合にだけ、`unresolved-mismatch → H_vec → H = ||H_vec|| → θ` の読み取り専用 sidecar へ進む。
 canonical H / θ が安定するまでは既存 local leap の authority を置き換えない。
