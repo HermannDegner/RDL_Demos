@@ -32,6 +32,11 @@ from .v23_boundary import (
     assess_village_mismatch,
 )
 from .v23_live_observer import VillageCanonicalObserver, attach_v23_observer
+from .v23_review import (
+    VillageLocalAbsorptionEvidence,
+    VillageUnresolvedReviewCandidate,
+    review_village_candidate,
+)
 from .world import PhysicalWorld, VillageClock
 
 __all__ = [
@@ -50,8 +55,11 @@ __all__ = [
     "VillageMismatch",
     "VillageUnresolvedH",
     "VillageCanonicalObserver",
+    "VillageLocalAbsorptionEvidence",
+    "VillageUnresolvedReviewCandidate",
     "assess_village_mismatch",
     "attach_v23_observer",
+    "review_village_candidate",
     # Legacy compatibility names. These no longer define Core H/xi/B semantics.
     "Boundary",
     "HVec",
