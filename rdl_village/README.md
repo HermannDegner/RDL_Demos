@@ -2,244 +2,279 @@
 
 RDL的NPCによる簡易村シミュレーター。Python実装、外部依存なし。
 
-> **Migration status:** 既存simulation本体は pre-v2.3 の歴史的実装を含む。現行Coreの意味基準は `Aporapeiron/RDL_Core` T0 BASE / SPEC v2.3 と T1 SILN操作層。`v23_boundary.py` にcanonical有限比較境界、`v23_live_observer.py` に実runtimeへ非介入で接続するread-only sidecar、`v23_review.py` に局所吸収証拠と有限review gate、`v23_mdelta_t1.py` に provenance付き `M_Δ -> T1` shadow経路を置く。legacy `LocalLoadVector / ExplorationState / LeapEngine` は現段階では行動authorityを維持する。
+> **Migration status:** Core v2.3 の canonical 経路は、finite B / RIB_B / F-F' / E / explicit review / H / θ / M_Δ / T1 Probe-Selection-Reconstruction / shadow re-entry / finite-context authority install / live re-entry まで実装済み。既存の `LocalLoadVector / ExplorationState / LeapEngine` は互換・村固有機構として残すが、移行済み finite context 内では canonical authority が再編権限を持つ。未移行 context では legacy authority を維持する。
 
 旧設計の参照元:
 
 - `RDL_簡易村シミュレーター`（T4 / DRAFT v0.1）
 - `RDL_NPC行動決定システム`（T4 / DRAFT v0.3）
 
-これらは形成史・実験設計として保持するが、Core v2.3の定義根拠として直接使用しない。
-
-係数の出発点は [rdl_system/profiles](../rdl_system/profiles/) の demo profile。係数はCore必須定数ではない。
+これらは形成史・実験設計として保持するが、Core v2.3 の定義根拠として直接使用しない。係数は demo-local な具体化であり、Core 必須定数ではない。
 
 ---
 
-## Core v2.3 migration boundary
-
-現在のcanonical sidecarは次の役割分離を固定する。
+## Canonical v2.3 path
 
 ```text
-selected village observations
-        ↓ Purpose / finite B / selected dimensions
-VillageRIBSection(t)
-        ↓ same frozen pre-update model_ref + coefficients
-        F
+selected village interaction
+  ↓ finite B / Purpose / dimensions / conditions
+RIB_B(t)
+  ↓ same frozen pre-update M_B evaluator
+F(t)
 
-later selected observations
-        ↓ same B / Purpose / dimensions / conditions
-VillageRIBSection(t+Δ)
-        ↓ same frozen evaluator
-        F'
-        ↓
-E = Δ(F, F')
-        ↓
-zero-difference | pending-assessment
-        ↓ separately audit current finite local model
-bounded local absorption evidence
-        ↓ review candidate only
-explicit finite review
-        ├ ordinary-temporal-change
-        ├ boundary-or-coverage-change
-        ├ resolved-difference
-        └ unresolved-mismatch (explicit dimensions only)
-                    ↓
-              H_vec → H → explicit θ
-                    ↓ H >= θ
-          provenance-checked M_Δ request
-                    ↓
-        current M_B -> SILN_SELF binding
-                    ↓
-          finite Probe evidence
-                    ↓
-      Selection = retain/reject/defer
-                    ↓ retain only
-          explicit M_B' proposal
-                    ↓
-        fresh RIB_B' shadow re-entry
+RIB_B(t+Δ)
+  ↓ same frozen evaluator
+F'(t+Δ)
+  ↓
+E = Δ(F,F')
+  ↓
+zero | pending
+  ↓ separately audit bounded local absorption attempt
+finite review candidate
+  ↓ explicit review only
+unresolved dimensions
+  ↓
+H_vec → H → explicit θ
+  ↓ H >= θ
+provenance-checked M_Δ request
+  ↓
+current M_B → SILN_SELF
+  ↓
+finite Probe evidence
+  ↓
+Selection = retain / reject / defer
+  ↓ retain only
+explicit M_B' proposal
+  ↓
+fresh shadow RIB_B' validation
+  ↓ multiple stable windows
+finite-context authority install
+  ↓
+fresh live re-entry validation
+  ↓
+normal operation for that finite context
 ```
 
-### Stage 1: hardened finite comparison boundary
+非ゼロ `E` の大きさだけから `unresolved`、`H`、再構成へ進む経路は持たない。
 
-`v23_boundary.py` は次を要求する。
+---
+
+## Stage 1 — finite comparison boundary
+
+`v23_boundary.py` は次を固定する。
 
 - finite B は `boundary_id / Purpose / selected dimensions / conditions` を明示する
-- selected dimension が欠測なら F/F' を形成しない。欠測を `0` に置換しない
-- F と F' は同じ pre-update `model_ref` と明示係数を使う
-- place / band 等のfinite conditionsが変わった場合は比較窓を切り、Eを形成しない
-- 非ゼロEは大きさだけでは `unresolved` にならず、既定は `pending-assessment`
-- `unresolved-mismatch` は未吸収dimensionを明示し、zero dimensionや範囲外dimensionをHへ入れない
-- mismatchは finite `conditions` を保持し、後続の M_Δ provenance がB文脈を再現できるようにする
-- `VillageUnresolvedH` は finite assessment objectだけを受け、reviewed unresolved componentだけを蓄積する
+- selected dimension の欠測を `0` に置換しない。欠測時は F/F' を形成しない
+- F と F' は同じ pre-update `model_ref` と係数を使う
+- place / band 等の finite conditions が変われば比較窓を切る
+- 非ゼロ E は既定で `pending-assessment`
+- `unresolved-mismatch` は unresolved dimension を明示する
+- mismatch は finite conditions を provenance として保持する
+- `VillageUnresolvedH` は reviewed unresolved component だけを受ける
 
-`VillageUnresolvedH.magnitude` の max norm と `theta` はVillage demo-localな有限具体化であり、Core唯一のnorm/定数とはしない。
+Village の `H = max(H_vec)` と θ は demo-local な有限具体化であり、Core 唯一の norm / 定数ではない。
 
-### Stage 2: live read-only observer
+---
 
-`v23_live_observer.py` は既存 `VillageSimulation.step()` がNPCへ渡している実知覚を opt-in で観測する。
+## Stage 2 — live read-only observer
 
-```python
-from rdl_village import VillageSimulation, attach_v23_observer
+`v23_live_observer.py` は実際の `VillageSimulation.step()` がNPCへ渡す知覚を opt-in で観測する。
 
-simulation = VillageSimulation(seed=7)
-observer = attach_v23_observer(simulation)
-simulation.run(480)
-print(observer.snapshot())
-```
-
-初期の有限観測次元は demo-local に次の4つを選ぶ。
+初期 selected dimensions:
 
 - `body_crisis`
 - `discomfort`
 - `visible_agents`
 - `visible_resources`
 
-係数はobserver生成時にコピーして固定する。place / band が変わればwindowを切る。observerは `LocalLoadVector / ExplorationState / LeapEngine` を読んでcanonical判定を作らず、policyにも書き戻さない。
+observer 作成時に係数を固定し、place / band が変われば comparison window を切る。`LocalLoadVector / ExplorationState / LeapEngine` を canonical E/H/ξ/θ の根拠として読まない。
 
-固定seedテストではobserver有無で world log / village log / agent state / RNG state が一致することを要求する。
+```python
+from rdl_village import VillageSimulation, attach_v23_observer
 
-### Stage 3: bounded local absorption evidence + finite review + diagnostic H
-
-Villageには `PredictionField.integrate()` が現在地の有限な場所モデルを局所更新する既存経路がある。sidecarは次の3軸だけを監査する。
-
-- `comfort` ← `discomfort` に対応するVillage-local update
-- `social_expectation` ← `visible_agents` に対応するVillage-local update
-- `resource_expectation` ← `visible_resources` に対応するVillage-local update
-
-前tickの有限snapshotと現在の知覚から、**既存runtimeの一回分の局所更新則で到達する値**を再計算し、実値と一致した場合だけ `bounded-local-adjustment-observed` とする。別経路の構造変更が混ざれば `confounded-structural-change` とし、吸収証拠にはしない。
-
-```text
-bounded local adjustment observed
-+ corresponding non-zero E dimension
-    ↓
-review candidate
+simulation = VillageSimulation(seed=7)
+observer = attach_v23_observer(simulation, theta=0.5)
+simulation.run(480)
+print(observer.snapshot())
 ```
 
-candidateはまだ `unresolved` ではない。`body_crisis` にはこのStageで対応する局所吸収則を立てていないため、Eが非ゼロでも自動的にcandidate dimensionへ含めない。
-
-`unresolved-mismatch` に進むには、有限reviewで少なくとも次を明示する。
-
-- ordinary temporal change を除外したこと
-- boundary / coverage change を除外したこと
-- unresolved とするdimension
-- reviewer
-- finite basis
-
-reviewされた unresolved dimensionだけが sidecar `H_vec` に入り、`H >= θ` はこの時点では **diagnostic-only**。legacy Leapを起動しない。
-
-### Stage 4: provenance-checked M_Δ + T1 shadow reconstruction
-
-`v23_mdelta_t1.py` は T0/T1 の責務境界を次のように実装する。
-
-#### M_Δ request
-
-`request_village_mdelta()` は、単に `H >= θ` を見るだけではrequestを作らない。
-
-- current `H_vec` を reviewed unresolved assessment から再計算する
--各reviewを元の review candidate / evidence refsへ結び直す
-- unresolved reviewが複数の finite context (`B / Purpose / dimensions / conditions`) を混在させている場合は拒否する
-- 再計算した `H_vec` が現在の sidecar `H_vec` と一致しなければ拒否する
-- request時点では `M_B'` や reconstruction target を生成しない
-- Core `ξ` を数値フィールドとして作らず、`unrecovered-relations-remain` として有限構造の非閉包性だけ保持する
-
-```text
-review provenance
-  ↓ recompute
-H_vec
-  ↓ compare
-current diagnostic H_vec
-  ↓ exact finite provenance match
-M_Δ request
-```
-
-#### T1 handoff / Probe / Selection
-
-`bind_village_mdelta_subject()` は current `M_B` を `SILN_SELF` として明示的に束縛する。ただし実装上保存する place model 等は **whole M_B と同一視せず finite subject slice** と明記する。
-
-Probe は未知や `RIB` 全体を直接取得する操作ではない。`record_village_probe()` は有限conditionのもとで得られた `RIB_B` 相当の selected observations と current subjectによる interpretation を evidence として保持するだけで、policyを変更しない。
-
-Selection は現行T1に合わせて `retain / reject / defer` を明示する。
-
-- `retain` は retained relations を必須とする
-- `defer` は unresolved items を必須とする
-- Probe provenance がhandoffの finite B / Purpose / dimensionsから外れた場合は拒否する
-- H vectorをcandidate update vectorとして使用しない
-
-#### M_B' proposal
-
-`propose_village_reconstruction()` は `retain` のときだけ explicit candidate structure から `M_B'` proposalを形成する。
-
-- candidate structureは呼出側が明示する。Hから自動生成しない
-- `B` を維持する場合は現在contextを継承する
-- `B -> B'` を行う場合は target boundary / Purpose / dimensions / conditions をすべて明示する
-- valid conditions / break conditions / unresolved items を保持する
-- numeric `xi / ξ` fieldを禁止する
-- proposalは `shadow-proposal-only` であり、NPCへinstallしない
-
-#### fresh re-entry validation
-
-`validate_village_reentry()` は候補 `M_B'` を installせず、fresh `RIB_B'` sectionsをcandidate evaluatorで解釈する。
-
-```text
-M_B' proposal
-  ↓ fresh RIB_B'(t), RIB_B'(t+Δ)
-F_new / F_new'
-  ↓
-E_new
-```
-
-- `E_new == 0` は shadow stable とできる
-- 非ゼロ `E_new` は既定で pending。直接 `H_new` にしない
-- finite reviewで `resolved-difference` / `ordinary-temporal-change` とされた場合のみ unresolved component 0 として shadow stable とする
-- unresolvedが疑われる場合は、この関数内で近道せず Stage 3 の full absorption/review gateへ戻す
-
-このため `M_B' proposal` が存在すること自体は authority cutover の根拠にならない。
+固定seedテストでは observer ON/OFF で world log / village log / agent state / RNG state が一致することを要求する。
 
 ---
 
-## Core ξ と demo-local exploration の分離
+## Stage 3 — bounded local absorption + finite review + H
 
-既存 `XiPool` が担ってきた「探索しやすさ」「未確定結果の保持」は有用なsimulation stateだが、現行Core `ξ` と同一ではない。
+Village 既存の `PredictionField.integrate()` にある一回分の場所モデル更新を、Core の普遍則ではなく **Village-local absorption-attempt evidence** として監査する。
 
-canonicalな実装名はすでに `ExplorationState` で、`XiPool` はcompatibility aliasに降格している。
+対応軸:
+
+- `comfort` ← `discomfort`
+- `social_expectation` ← `visible_agents`
+- `resource_expectation` ← `visible_resources`
+
+前tick snapshotと現在知覚から既存の一回分更新則を再計算し、実値と一致した場合だけ `bounded-local-adjustment-observed` とする。別経路の変更が混ざれば `confounded-structural-change`。`body_crisis` にはこの経路を捏造しない。
+
+自動観測が作るのは review candidate まで。`unresolved-mismatch` には少なくとも以下を明示する。
+
+- reviewer
+- finite basis
+- ordinary temporal change を除外したこと
+- boundary / coverage change を除外したこと
+- unresolved dimensions
+
+reviewed unresolved dimensions だけが H に入る。
+
+---
+
+## Stage 4 — M_Δ and T1 shadow reconstruction
+
+`v23_mdelta_t1.py` は T0/T1 境界を実装する。
+
+### M_Δ request
+
+`request_village_mdelta()` は `H >= θ` に加えて、review provenance から current `H_vec` を再計算できることを要求する。元の review candidate / evidence refs が欠ける、finite context が混在する、再計算Hがsidecar Hと一致しない場合は拒否する。
+
+request 時点では `M_B'` や reconstruction target を生成しない。Core ξ は数値化せず `unrecovered-relations-remain` として保持する。
+
+### SILN_SELF / Probe / Selection
+
+`bind_village_mdelta_subject()` は current `M_B` を `SILN_SELF` として束縛する。実装上取得できる place model は **finite subject slice** であり whole M_B と同一視しない。
+
+Probe は有限条件を変えて得られる `RIB_B` 相当の観測・解釈証拠を保持する。RIB 全体や ξ を取得したとはみなさない。
+
+Selection は `retain / reject / defer`。retain は retained relations、defer は unresolved items を必須とする。H vector は candidate update vectorにしない。
+
+### M_B' proposal / shadow re-entry
+
+`propose_village_reconstruction()` は retain の場合だけ、呼出側が明示した candidate structure から `M_B'` proposal を作る。Bを変える場合は target B/Purpose/dimensions/conditions を明示する。
+
+`validate_village_reentry()` は fresh `RIB_B'` で F_new/F_new'/E_new を形成する。非ゼロ fresh E は既定で pending であり、直接 H_new にしない。unresolved が疑われる場合は full review gate へ戻す。
+
+---
+
+## Stage 5 — finite-context canonical authority
+
+`v23_authority.py` は shadow proposal を live authority へ定着させる最終 gate を提供する。
+
+authority は agent 全体へ一括で広げず、exact finite context:
+
+```text
+B / Purpose / dimensions / place / band
+```
+
+ごとに移行する。
+
+install 条件:
+
+- actual `VillageReconstructionProposal`
+- 複数の **distinct fresh** stable shadow re-entry windows
+- explicit installer / finite basis / evidence refs
+- complete finite observer coefficients
+- bounded explicit `placeMeaningPatch`
+- target B/Purpose/dimensions/place/band と runtime adapter の一致
+- nested を含む numeric `xi / ξ` を禁止
+
+移行済み context 内では candidate evaluator と context-local place-meaning state が有効になり、legacy `LeapEngine.check/check_basal` は再編 authority を持たない。
+
+同じ場所でも別 band は別 finite B なので、例えば morning の `M_B'` を evening へ自動的に流用しない。context 切替時に base state と各 reconstructed state を保存・復元し、それぞれ独立に更新可能とする。
+
+未移行 context では legacy runtime を維持する。これは universal truth への切替ではなく、有限B単位の段階的 authority migration である。
+
+install 後は fresh model epoch を開始し、後続 live evidence で re-entry を検査する。re-entry 中に reviewed unresolved H が再び θ へ達した場合、その context は `M_delta-required` に戻る。
+
+---
+
+## Stage 6 — explicit canonical runtime driver
+
+`v23_runtime.py` は test harness の手配を減らし、canonical object を一つの state machine で運ぶ。
+
+```text
+explicit review
+ → context-local H
+ → M_Δ
+ → SILN_SELF
+ → explicit Probe
+ → explicit Selection
+ → explicit candidate M_B'
+ → shadow validation
+ → finite-context install
+ → live re-entry
+```
+
+重要なのは、この driver が **判定責任を自動化しない**こと。
+
+- pending E を自動 unresolved にしない
+- Probe evidence を捏造しない
+- Selection を捏造しない
+- candidate structure を H から自動生成しない
+- ξ を数値化しない
+
+つまり runtime driver は orchestration であり、有限reviewそのものの代替ではない。
+
+```python
+from rdl_village import VillageSimulation, install_village_canonical_runtime
+
+simulation = VillageSimulation(seed=7)
+runtime = install_village_canonical_runtime(simulation, theta=0.5)
+```
+
+runtime を install しただけでは挙動を変更しない。actual proposal が authority gate を通った finite context だけが canonical authority へ移行する。
+
+---
+
+## Core ξ and demo-local exploration
+
+既存 `ExplorationState` は探索圧と未確定結果キューを持つ有用な村状態だが、Core ξ ではない。
 
 ```text
 ExplorationState != Core ξ
 ExplorationState != Core H
+LocalLoadVector != Core H
 boredom / fear / dialogue load != Core H by identity
 all prediction error != H
+ActionBoundary.theta_effective(...) != canonical θ law
 ```
 
-同様に、既存 `HVec` は `LocalLoadVector`、`Boundary` は `ActionBoundary` が実装上の本名であり、旧名は固定seed互換のため残している。
+旧名 `XiPool / HVec / Boundary` は固定seed互換のため alias として残すが、Core定義根拠にはしない。
 
 ---
 
-## 現行legacy/local authority
+## Authority scope
 
-既存runtimeでは `evaluate_prediction()` が prediction residual / direct motivation / boredom 等を local load に集積し、`ExplorationState` によって局所閾値を動かし、`LeapEngine` が再編を行う。
-
-これは村モデルとして保持するが、以下とは同一視しない。
+default の `VillageSimulation` は歴史的/村固有 runtime を保持する。
 
 ```text
-LocalLoadVector != Core H
-ExplorationState.value != Core ξ
-ActionBoundary.theta_effective(...) != canonical θ law
-LeapEngine != canonical H >= θ -> M_Δ authority
+no canonical runtime installed
+  → legacy/local authority
+
+canonical runtime installed, no context activated
+  → behavior-equivalent legacy/local authority
+
+activated finite B
+  → canonical M_B' authority
+  → legacy Leap reconstruction suppressed in that B
+
+outside activated B
+  → legacy/local authority until separately migrated
 ```
 
-canonical sidecar / T1 shadow はこの経路へまだauthorityを持たない。
+この分離により、移行途中でも finite context を越えて authority を過剰一般化しない。
 
 ---
 
-## 実行
+## 実行・テスト
 
 ```bash
-python -m rdl_village 640 7        # 640tick（10日）、seed 7
+python -m rdl_village 640 7
 python -m rdl_village.test_regression
-python -m unittest rdl_village.test_v23_boundary rdl_village.test_v23_mdelta_t1 -v
+python -m unittest \
+  rdl_village.test_v23_boundary \
+  rdl_village.test_v23_mdelta_t1 \
+  rdl_village.test_v23_authority \
+  rdl_village.test_v23_runtime -v
 ```
 
-同じ seed・同じ tick 数から同じ snapshot を得る回帰境界を維持する。
+固定seed回帰を維持し、canonical managerを入れただけで既存挙動が変わらないことも検査する。
 
 ---
 
@@ -247,23 +282,26 @@ python -m unittest rdl_village.test_v23_boundary rdl_village.test_v23_mdelta_t1 
 
 | モジュール | 内容 |
 |---|---|
-| `v23_boundary.py` | **CURRENT canonical boundary** — finite B / RIB_B / F / F' / E / context provenance / dimension-specific assessment / unresolved H |
-| `v23_live_observer.py` | **CURRENT live sidecar** — actual perception / local-update audit / review candidates / diagnostic H |
-| `v23_review.py` | **CURRENT finite review gate** — bounded local absorption evidence / explicit unresolved review |
-| `v23_mdelta_t1.py` | **CURRENT T0/T1 shadow boundary** — M_Δ request / SILN_SELF binding / Probe / Selection / M_B' proposal / fresh re-entry validation |
-| `core.py` | pre-v2.3動態を含む既存simulation core。local canonical-name + compatibility alias |
-| `profiles.py` | 係数プロファイルと NeuroProfile |
-| `world.py` | 時計・場所・資源循環・物理環境 |
-| `perception.py` | 個体知覚と個体予測場 |
-| `relations.py` | 方向つき多軸関係 |
-| `dialogue.py` | 語彙ノードと構造化 DialogueEvent |
-| `action.py` | 関係作用・移動計画・物理ゲート |
-| `npc.py` | VillageNPC と意思決定サイクル。legacy/local authorityを現状維持 |
-| `simulation.py` | tick進行・イベント配布・結果評価・非介入観測 |
-| `richness.py` | 生命らしさの測定 |
-| `test_v23_boundary.py` | canonical境界 / absorption / review / live非介入テスト |
-| `test_v23_mdelta_t1.py` | M_Δ provenance / T1 Probe-Selection-reconstruction / re-entry tests |
-| `test_regression.py` | 固定シードの既存挙動回帰 |
+| `v23_boundary.py` | finite B / RIB_B / F/F' / E / context provenance / assessment / H |
+| `v23_live_observer.py` | actual perception / local-update audit / review candidates / H sidecar |
+| `v23_review.py` | bounded local absorption evidence / explicit finite review gate |
+| `v23_mdelta_t1.py` | M_Δ / SILN_SELF / Probe / Selection / M_B' proposal / shadow re-entry |
+| `v23_authority.py` | finite-context authority gate / state isolation / live re-entry |
+| `v23_runtime.py` | explicit canonical orchestration state machine |
+| `core.py` | historical/local load・exploration・Leap compatibility runtime |
+| `profiles.py` | demo coefficient profiles |
+| `world.py` | clock / places / resources / physical environment |
+| `perception.py` | individual perception and prediction field |
+| `relations.py` | directed multi-axis relations |
+| `dialogue.py` | vocabulary nodes / structured dialogue events |
+| `action.py` | action candidates / movement / physical gates |
+| `npc.py` | VillageNPC decision cycle |
+| `simulation.py` | tick progression / event resolution / observation integration |
+| `test_v23_boundary.py` | finite comparison / review / observer tests |
+| `test_v23_mdelta_t1.py` | M_Δ and T1 shadow tests |
+| `test_v23_authority.py` | finite-context cutover / isolation / non-intervention tests |
+| `test_v23_runtime.py` | end-to-end explicit canonical runtime path |
+| `test_regression.py` | fixed-seed historical behavior regression |
 
 ---
 
@@ -271,45 +309,34 @@ python -m unittest rdl_village.test_v23_boundary rdl_village.test_v23_mdelta_t1 
 
 以下は村モデルとして有用なので、Core記号から分離しながら保持する。
 
-- **物理世界と個体予測場の分離** — NPC側モジュールは物理世界の真値を先読みしない
-- **同時解決** — tick解決を複数相へ分離し、個体ごとに独立した乱数列を持つ
-- **説明つき予測差** — どの差がどの条件で説明されたかを記録する
-- **固着・再前景化** — 長期に残る内部負荷のHuman/demo側モデル
-- **退屈・自発探索** — 低変化環境で探索を増やすsimulation-local mechanism
-- **思考的探索** — 身体を動かさず候補構造を探索する
-- **繁殖動機・備蓄** — 村固有の行動力学
+- 物理世界と個体予測場の分離
+- 同時解決と個体別乱数列
+- 説明つき予測差
+- 固着・再前景化
+- 退屈・自発探索
+- 思考的探索
+- 繁殖動機・備蓄
 
 これらを `ξ / H / M_Δ` と自動的に同一視しない。
 
 ---
 
-## 付属文書
+## Migration status
 
-### `RDL_生命らしさ評価指針.md`
+1. **DONE** — finite B / coverage / same frozen evaluator / assessment boundary
+2. **DONE** — actual perception read-only observer
+3. **DONE** — bounded local absorption evidence
+4. **DONE** — explicit finite unresolved review
+5. **DONE** — reviewed unresolved `H_vec → H → explicit θ`
+6. **DONE** — provenance-checked `M_Δ → SILN_SELF → Probe → Selection → M_B' proposal`
+7. **DONE** — fresh shadow re-entry validation
+8. **DONE (finite-context / opt-in)** — canonical authority cutover and legacy Leap suppression inside migrated B
+9. **DONE** — explicit runtime orchestration from review through live re-entry
+10. **NEXT / optional operational layer** — repeated finite evidenceからreview提案を支援する場合も、automatic unresolved promotionとは分離する
+11. **NEXT** — sufficient finite-context coverage が得られた後に default runtime coverage を検討する
+12. **NEXT** — legacy Core-like symbol aliases を compatibility layer へさらに閉じ込める
 
-何を「良くなった」とみなすかを検討する実験文書。生存を単一目的関数にせず、複数軸で観察する。
-
-### `破断検査.md`
-
-実装がどの条件で崩れるかの記録。成功した修正だけでなく、失敗した試行列も過程として残す。
-
-これらにもpre-v2.3語彙が残る可能性があるため、現行Core記号との対応はrole mappingとして再検査する。
-
----
-
-## 次の移行順
-
-1. **DONE** — finite B / coverage / same frozen evaluator / assessment境界を硬化
-2. **DONE** — actual `simulation.step()` perceptionへread-only observerをopt-in接続
-3. **DONE** — bounded local absorption attempt evidenceをlegacy H/xiから独立して監査
-4. **DONE** — explicit finite reviewでordinary temporal / boundary / resolved / unresolvedを分離
-5. **DONE (diagnostic-only)** — reviewed unresolved dimensionだけを `H_vec -> H -> explicit θ` へ接続
-6. **DONE (shadow)** — provenance付き `M_Δ request -> SILN_SELF -> Probe -> Selection -> M_B' proposal`
-7. **DONE (shadow validation)** — fresh `RIB_B'` による re-entry validation。fresh Eを直接Hへしない
-8. **NEXT** — runtime上で canonical path の有限review/proposal が十分成立したケースだけ、legacy `LeapEngine` から再編authorityを段階的にcutover
-9. 旧Core記号名をcompatibility層へさらに閉じ込める
-
-段階ごとに固定seed回帰を維持し、挙動変更と意味名称変更を同時に行わない。
+現時点で migration infrastructure はほぼ完成しているが、**全 place / band を一括で canonical authority にしたわけではない**。未観測・未検査の finite context は未移行として残す。
 
 ---
 
@@ -317,11 +344,11 @@ python -m unittest rdl_village.test_v23_boundary rdl_village.test_v23_mdelta_t1 
 
 この村には環境過酷性が薄く、捕食者・致死的天候・季節・病気などの外圧が限定的。そのため生存率だけではモデル評価にならない。
 
-また短期simulationに対して、個体側にはより長い時間スケールの仮説が含まれる。世界側に対応する変化が無い場合、その層の形成を実証したことにはならない。
+短期simulationに対して個体側には長い時間スケールの仮説も含まれる。世界側に対応する変化が無い場合、その層の形成を実証したことにはならない。
 
 既存の未解決事項:
 
 - 破断・負荷が特定チャネルへ偏る可能性
 - `gather` がほとんど駆動しない条件
 - 夜に留まるコストが弱く、生活相として立ちにくい
-- demo-local explorationとCore ξの旧語彙をcompatibility層へ完全隔離する必要
+- demo-local exploration と Core ξ の旧語彙を compatibility layer へ完全隔離する必要
