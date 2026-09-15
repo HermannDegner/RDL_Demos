@@ -48,6 +48,7 @@ function sameFiniteContext(earlierSection, laterSection) {
 export class PostAdjustmentResidualReview {
   constructor({
     assessment,
+    mismatch,
     finiteContext,
     coverageDisposition,
     temporalDisposition,
@@ -57,6 +58,7 @@ export class PostAdjustmentResidualReview {
     provenance,
   }) {
     this.assessment = assessment;
+    this.mismatch = mismatch;
     this.finiteContext = finiteContext;
     this.coverageDisposition = coverageDisposition;
     this.temporalDisposition = temporalDisposition;
@@ -148,6 +150,7 @@ export function reviewPostAdjustmentResidual(
 
   return new PostAdjustmentResidualReview({
     assessment,
+    mismatch: comparison.E,
     finiteContext,
     coverageDisposition,
     temporalDisposition,
