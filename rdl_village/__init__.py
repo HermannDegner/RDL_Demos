@@ -64,6 +64,7 @@ from .v23_mdelta_t1 import (
     validate_village_reentry,
 )
 from .v23_operational import VillageOperationalCoverage, install_village_operational_coverage
+from .v23_report import run_operational_baseline
 from .v23_review import (
     VillageLocalAbsorptionEvidence,
     VillageUnresolvedReviewCandidate,
@@ -115,6 +116,7 @@ __all__ = [
     "CANONICAL_V23_MODULES",
     "compatibility_snapshot",
     "village_local_dynamics_view",
+    "run_operational_baseline",
     "INSTALL_KIND",
     "INSTALL_SCOPE",
     "assess_village_mismatch",
