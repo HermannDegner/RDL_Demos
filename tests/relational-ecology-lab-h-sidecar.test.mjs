@@ -52,12 +52,11 @@ test("only reviewed unresolved mismatch enters H_vec and L2 H", () => {
 });
 
 test("ordinary temporal or coverage review does not enter H", () => {
-  const comparison = comparisonAfterBoundedAttempt();
-  const temporal = reviewed(comparison, {
+  const temporal = reviewed(comparisonAfterBoundedAttempt(), {
     temporalDisposition: "ordinary-temporal-change",
     basis: "finite review attributes the difference to ordinary temporal change",
   });
-  const coverage = reviewed(comparisonAfterBoundedAttempt("rabbit:h2"), {
+  const coverage = reviewed(comparisonAfterBoundedAttempt(), {
     coverageDisposition: "coverage-change-observed",
     basis: "finite review observed changed acquisition coverage",
     evidenceRefs: ["finite-review:h:coverage"],
@@ -89,11 +88,12 @@ test("generic assessment-shaped objects and legacy numeric state cannot enter H 
   assert.deepEqual(sidecar.snapshot().HVector, {});
 });
 
-test("H accumulation cannot silently cross finite observer contexts", () => {
+test("H accumulation cannot silently cross finite observer contexts and rejection is atomic", () => {
   const sidecar = new LivingFieldHSidecar({ theta: 10 });
   sidecar.observeReview(reviewed(comparisonAfterBoundedAttempt("rabbit:h-a"), {
     evidenceRefs: ["finite-review:h:a"],
   }));
+  const before = sidecar.snapshot();
 
   assert.throws(
     () => sidecar.observeReview(reviewed(comparisonAfterBoundedAttempt("rabbit:h-b"), {
@@ -101,6 +101,7 @@ test("H accumulation cannot silently cross finite observer contexts", () => {
     })),
     /different finite review contexts/,
   );
+  assert.deepEqual(sidecar.snapshot(), before);
 });
 
 test("theta is explicit and H snapshot is immutable diagnostic state", () => {
