@@ -75,6 +75,10 @@ export class LivingFieldHSidecar {
     return l2(this.values);
   }
 
+  get H() {
+    return this.magnitude;
+  }
+
   get shouldReconstruct() {
     return this.magnitude >= this.theta;
   }
@@ -83,7 +87,7 @@ export class LivingFieldHSidecar {
     return Object.freeze({
       context: this.context ? Object.freeze({ ...this.context }) : null,
       HVector: Object.freeze({ ...this.values }),
-      H: this.magnitude,
+      H: this.H,
       theta: this.theta,
       shouldReconstruct: this.shouldReconstruct,
       reviewed: this.reviewed,
