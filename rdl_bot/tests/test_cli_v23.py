@@ -60,9 +60,12 @@ class _LLM:
     def available(self):
         return self._available
 
-    def ask_for_node_revision(self, node, user_input=None):
-        self.calls.append((node.id, user_input))
+    def ask_for_canonical_node_revision(self, node, request):
+        self.calls.append((node.id, request))
         return self.revised
+
+    def ask_for_node_revision(self, node, user_input=None):
+        raise AssertionError("canonical CLI must not use legacy H/deny revision")
 
 
 class _LegacyMain:
