@@ -1,5 +1,6 @@
 import random
 import unittest
+from types import SimpleNamespace
 
 from .dialogue import RelationalDialogueSystem
 from . import dialogue_local_aliases as _dialogue_local_aliases  # noqa: F401
@@ -15,7 +16,7 @@ from .v23_boundary import (
     compare_village_interpretations,
     interpret_village_section,
 )
-from .v23_live_observer import attach_v23_observer
+from .v23_live_observer import VillageCanonicalObserver, attach_v23_observer
 
 
 class VillageV23BoundaryTests(unittest.TestCase):
@@ -135,13 +136,14 @@ class VillageV23BoundaryTests(unittest.TestCase):
         self.assertEqual(h.magnitude, 0.0)
         self.assertFalse(h.should_reconstruct)
 
-    def test_only_explicit_unresolved_assessment_can_enter_h(self):
+    def test_only_explicit_dimension_specific_unresolved_assessment_can_enter_h(self):
         _, _, mismatch = self._mismatch()
         with self.assertRaises(ValueError):
             assess_village_mismatch(
                 mismatch,
                 status="unresolved-mismatch",
                 basis=("persistent finite mismatch",),
+                assessor="test-harness",
             )
 
         assessment = assess_village_mismatch(
@@ -149,9 +151,12 @@ class VillageV23BoundaryTests(unittest.TestCase):
             status="unresolved-mismatch",
             basis=("persistent finite mismatch",),
             assessor="test-harness",
+            unresolved_dimensions=("danger",),
         )
         h = VillageUnresolvedH(theta=0.5)
         h.observe(assessment)
+        self.assertEqual(h.values.get("resource", 0.0), 0.0)
+        self.assertAlmostEqual(h.values["danger"], 0.6)
         self.assertAlmostEqual(h.magnitude, 0.6)
         self.assertTrue(h.should_reconstruct)
 
@@ -173,6 +178,127 @@ class VillageV23BoundaryTests(unittest.TestCase):
         system.unresolved_dialogue_queue.append(("ask", "unknown-topic"))
         self.assertEqual(system.xi_pool, [("ask", "unknown-topic")])
         self.assertFalse(hasattr(system.unresolved_dialogue_queue, "xi"))
+
+    @staticmethod
+    def _fake_agent_and_perception(*, tick=1, crisis=0.2, discomfort=0.0, agents=0, resources=0):
+        meaning = SimpleNamespace(
+            comfort=0.04,
+            social_expectation=0.0,
+            resource_expectation=0.0,
+        )
+        body = SimpleNamespace(crisis=lambda: crisis)
+        agent = SimpleNamespace(
+            name="Test",
+            body=body,
+            prediction_field=SimpleNamespace(places={"well": meaning}),
+        )
+        perception = SimpleNamespace(
+            t=tick,
+            place_id="well",
+            band="morning",
+            discomfort=discomfort,
+            visible_agents=[object() for _ in range(agents)],
+            visible_resources=[SimpleNamespace(state="available") for _ in range(resources)],
+        )
+        return agent, perception, meaning
+
+    def test_bounded_local_adjustment_creates_review_candidate_but_not_unresolved(self):
+        observer = VillageCanonicalObserver(theta=0.2)
+        agent, first, meaning = self._fake_agent_and_perception()
+        observer.capture(agent, first, 1)
+
+        # Existing PredictionField.integrate local update law for the next same-B window.
+        meaning.comfort = 0.04 * 0.97 - 0.03
+        meaning.social_expectation = 0.03
+        meaning.resource_expectation = 0.04
+        agent.body.crisis = lambda: 0.5
+        second = SimpleNamespace(
+            t=2,
+            place_id="well",
+            band="morning",
+            discomfort=0.5,
+            visible_agents=[object()],
+            visible_resources=[SimpleNamespace(state="available")],
+        )
+        observer.capture(agent, second, 2)
+
+        record = observer.records_for("Test")[-1]
+        self.assertEqual(record["status"], "pending-assessment")
+        self.assertEqual(record["localAbsorption"], "bounded-local-adjustment-observed")
+        self.assertNotIn("body_crisis", record["reviewCandidateDimensions"])
+        self.assertEqual(
+            set(record["reviewCandidateDimensions"]),
+            {"discomfort", "visible_agents", "visible_resources"},
+        )
+        self.assertEqual(observer.h_snapshot("Test")["H"], 0.0)
+
+        candidate_id = record["reviewCandidate"]
+        with self.assertRaises(ValueError):
+            observer.submit_review(
+                "Test",
+                candidate_id,
+                status="unresolved-mismatch",
+                basis=("same finite window",),
+                assessor="test-reviewer",
+                unresolved_dimensions=("visible_agents",),
+            )
+
+        assessment = observer.submit_review(
+            "Test",
+            candidate_id,
+            status="unresolved-mismatch",
+            basis=(
+                "bounded local place-model adjustment observed",
+                "subsequent finite difference remains on selected dimension",
+            ),
+            assessor="test-reviewer",
+            ordinary_temporal_change_excluded=True,
+            boundary_or_coverage_change_excluded=True,
+            unresolved_dimensions=("visible_agents",),
+        )
+        self.assertEqual(assessment.unresolved_dimensions, ("visible_agents",))
+        h = observer.h_snapshot("Test")
+        self.assertEqual(h["H_vec"].get("body_crisis", 0.0), 0.0)
+        self.assertAlmostEqual(h["H_vec"]["visible_agents"], 0.25)
+        self.assertAlmostEqual(h["H"], 0.25)
+        self.assertTrue(h["shouldReconstructDiagnostic"])
+        self.assertEqual(h["authority"], "diagnostic-only")
+
+        with self.assertRaises(ValueError):
+            observer.submit_review(
+                "Test",
+                candidate_id,
+                status="unresolved-mismatch",
+                basis=("duplicate",),
+                assessor="test-reviewer",
+                ordinary_temporal_change_excluded=True,
+                boundary_or_coverage_change_excluded=True,
+                unresolved_dimensions=("visible_agents",),
+            )
+
+    def test_confounded_local_change_never_becomes_review_candidate(self):
+        observer = VillageCanonicalObserver(theta=0.2)
+        agent, first, meaning = self._fake_agent_and_perception()
+        observer.capture(agent, first, 1)
+
+        meaning.comfort = 0.04 * 0.97 - 0.03
+        meaning.social_expectation = 0.03
+        # Existing local law would yield 0.04; extra structural change is deliberately mixed in.
+        meaning.resource_expectation = 0.14
+        second = SimpleNamespace(
+            t=2,
+            place_id="well",
+            band="morning",
+            discomfort=0.5,
+            visible_agents=[object()],
+            visible_resources=[SimpleNamespace(state="available")],
+        )
+        observer.capture(agent, second, 2)
+        record = observer.records_for("Test")[-1]
+        self.assertEqual(record["localAbsorption"], "confounded-structural-change")
+        self.assertIsNone(record["reviewCandidate"])
+        self.assertEqual(observer.review_candidates_for("Test"), ())
+        self.assertEqual(observer.h_snapshot("Test")["H"], 0.0)
 
     def test_live_observer_is_fixed_seed_non_intervening(self):
         plain = VillageSimulation(seed=19)
@@ -219,6 +345,9 @@ class VillageV23BoundaryTests(unittest.TestCase):
             )
         )
         self.assertTrue(all(record["eligibleForH"] is False for record in formed))
+        self.assertTrue(
+            all(observer.h_snapshot(agent.name)["H"] == 0.0 for agent in watched.agents)
+        )
         self.assertEqual(observer.snapshot()["authority"], "read-only-sidecar")
 
 
